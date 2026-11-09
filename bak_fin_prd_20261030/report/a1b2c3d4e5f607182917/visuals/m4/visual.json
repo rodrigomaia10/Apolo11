@@ -1,0 +1,236 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.12.0/schema.json",
+  "name": "m4",
+  "position": {
+    "x": 20,
+    "y": 620,
+    "z": 900,
+    "height": 255,
+    "width": 770,
+    "tabOrder": 900
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Faturamento operacional: ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#0B2545",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "receita bruta dos CT-e e NF do painel (status A ou S), cada documento uma vez, pelo mês de emissão.",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#5B6B7F"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "Left"
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Margem de contribuição (principal): ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#0B2545",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "fórmula do DRE (contas marcadas na margem bruta sobre as marcadas XD) aplicada aos lançamentos do KMM; é a margem da curva e da Diretoria.",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#5B6B7F"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "Left"
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Margem por cliente: ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#0B2545",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "margem após impostos: receita dos documentos menos custo de frete e ocorrência e menos os impostos do documento; a soma dos clientes mais a linha 'não ligado a cliente' fecha com a margem de contribuição do DRE.",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#5B6B7F"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "Left"
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Saídas de caixa: ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#0B2545",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "todas as baixas de títulos a pagar (folha, tributos, contratos, empréstimos); não é o saldo bancário.",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "9pt",
+                      "color": "#5B6B7F"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "Left"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "color": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#FFFFFF'"
+                    }
+                  }
+                }
+              }
+            },
+            "transparency": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "color": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#E1E6EE'"
+                    }
+                  }
+                }
+              }
+            },
+            "radius": {
+              "expr": {
+                "Literal": {
+                  "Value": "10D"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Definições usadas'"
+                }
+              }
+            },
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#0B2545'"
+                    }
+                  }
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "13D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "subTitle": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

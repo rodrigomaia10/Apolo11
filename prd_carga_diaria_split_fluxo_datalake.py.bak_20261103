@@ -1,0 +1,160 @@
+from datetime import datetime
+from airflow import DAG
+from airflow.operators.empty import EmptyOperator
+from airflow.utils import timezone
+from airflow.providers.amazon.aws.operators.glue import GlueJobOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+import os
+import json
+
+
+GLUE_JOB_BRONZE = "jdbc_to_bronze"
+GLUE_JOB_SILVER = "bronze_to_silver"
+GLUE_JOB_GOLD = "silver_to_gold"
+
+arquivos_json = [
+    "multi_1.json",
+    "multi_2.json",
+    "multi_3.json",
+    "kmm_1.json",
+    "kmm_2.json"
+]
+
+def get_env(tipo="hml"):
+    config_path = os.path.join(os.path.dirname(__file__), "env.json")
+
+    with open(config_path) as f:
+        config = json.load(f)
+
+    env = config.get(f"env_{tipo}", "NOT_DEFINED")
+
+    print(f"ENV detectado: {env}")
+    return env
+
+env = get_env("prd")
+
+with DAG(
+    dag_id="prd_carga_diaria_split_fluxo_datalake",
+    start_date=timezone.datetime(2026, 2, 26),
+    schedule="0 4,14,19 * * *",
+    catchup=False,
+    max_active_runs=1,
+    tags=["carga_diaria", "glue"],
+) as dag:
+
+    start = EmptyOperator(
+        task_id="start"
+    )
+
+    end = EmptyOperator(
+        task_id="end"
+    )
+
+    executar_glue_bronze_1 = GlueJobOperator(
+        task_id="run_bronze_1",
+        job_name=GLUE_JOB_BRONZE,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        script_args={
+            "--ENV": env,
+            "--FILE_JSON": arquivos_json[0]
+        },
+        run_job_kwargs={
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 4
+        }
+    )
+    
+    executar_glue_bronze_2 = GlueJobOperator(
+        task_id="run_bronze_2",
+        job_name=GLUE_JOB_BRONZE,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        script_args={
+            "--ENV": env,
+            "--FILE_JSON": arquivos_json[1]
+        },
+        run_job_kwargs={
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 4
+        }
+    )
+    
+    executar_glue_bronze_3 = GlueJobOperator(
+        task_id="run_bronze_3",
+        job_name=GLUE_JOB_BRONZE,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        script_args={
+            "--ENV": env,
+            "--FILE_JSON": arquivos_json[2]
+        },
+        run_job_kwargs={
+            "WorkerType": "G.2X",
+            "NumberOfWorkers": 3
+        }
+    )
+    
+    executar_glue_bronze_4 = GlueJobOperator(
+        task_id="run_bronze_4",
+        job_name=GLUE_JOB_BRONZE,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        script_args={
+            "--ENV": env,
+            "--FILE_JSON": arquivos_json[3]
+        },
+        run_job_kwargs={
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 4
+        }
+    )
+    
+    executar_glue_bronze_5 = GlueJobOperator(
+        task_id="run_bronze_5",
+        job_name=GLUE_JOB_BRONZE,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        script_args={
+            "--ENV": env,
+            "--FILE_JSON": arquivos_json[4]
+        },
+        run_job_kwargs={
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 4
+        }
+    )
+
+    executar_glue_silver = GlueJobOperator(
+        task_id="run_silver_task",
+        job_name=GLUE_JOB_SILVER,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        verbose=False,
+        job_poll_interval=60,
+        script_args={
+            "--ENV": env
+        }
+    )
+
+    executar_glue_gold = GlueJobOperator(
+        task_id="run_gold_task",
+        job_name=GLUE_JOB_GOLD,
+        wait_for_completion=True,
+        region_name="us-east-1",
+        verbose=False,
+        job_poll_interval=60,
+        script_args={
+            "--ENV": env
+        }
+    )
+
+    trigger_proxima_dag = TriggerDagRunOperator(
+        task_id="trigger_proxima_dag",
+        trigger_dag_id="hml_carga_diaria_fluxo_datalake",
+        wait_for_completion=False,
+        trigger_rule="all_success"
+    )
+
+    start >> [executar_glue_bronze_1,executar_glue_bronze_2,executar_glue_bronze_3,executar_glue_bronze_4,executar_glue_bronze_5] >> executar_glue_silver >> executar_glue_gold >> trigger_proxima_dag >> end

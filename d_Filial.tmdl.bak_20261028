@@ -1,0 +1,52 @@
+table d_Filial
+	lineageTag: 0e1ed25c-5f81-4ddc-885b-e6b9a5d83cee
+
+	column COD_CENTRO_CUSTO
+		dataType: int64
+		formatString: 0
+		lineageTag: 33ba5cde-48f8-4ff3-a764-effa19fa4907
+		summarizeBy: none
+		sourceColumn: COD_CENTRO_CUSTO
+
+		annotation SummarizationSetBy = Automatic
+
+	column COD_PESSOA
+		dataType: int64
+		formatString: 0
+		lineageTag: 22695916-98a3-4011-9dc9-98a72f4f3125
+		summarizeBy: none
+		sourceColumn: COD_PESSOA
+
+		annotation SummarizationSetBy = Automatic
+
+	column CNPJ_CPF
+		dataType: string
+		lineageTag: 5300eb68-9492-4095-95a4-f61ba69e2757
+		summarizeBy: none
+		sourceColumn: CNPJ_CPF
+
+		annotation SummarizationSetBy = Automatic
+
+	column CLIENTE
+		dataType: string
+		lineageTag: a9fcaca3-3a91-436d-8047-a69ae05c0005
+		summarizeBy: none
+		sourceColumn: CLIENTE
+
+		annotation SummarizationSetBy = Automatic
+
+	partition d_Filial = m
+		mode: import
+		source =
+				let
+				    Fonte = Odbc.Query("dsn=kmm_prod", "select distinct cc.""COD_CENTRO_CUSTO"", p.""COD_PESSOA"", p.""CNPJ_CPF"", p.""CLIENTE"" from   kss.centro_custo cc  #(lf)inner join  kss.organograma o on cc.""COD_CENTRO_CUSTO"" = o.""COD_CENTRO_CUSTO""#(lf)inner join kss.pessoa p on o.""COD_PESSOA"" = p.""COD_PESSOA"""),
+				    // Uma linha por centro de custo (a junção com organograma/pessoa duplicava o código, ex.: 25); fica a menor COD_PESSOA.
+				    Ordenada = Table.Sort(Fonte, {{"COD_CENTRO_CUSTO", Order.Ascending}, {"COD_PESSOA", Order.Ascending}}),
+				    Unica = Table.Distinct(Ordenada, {"COD_CENTRO_CUSTO"})
+				in
+				    Unica
+
+	annotation PBI_NavigationStepName = Navegação
+
+	annotation PBI_ResultType = Table
+

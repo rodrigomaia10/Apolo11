@@ -1,0 +1,114 @@
+[
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "dim_conta",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/dim_conta.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "dim_origem_contabil",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/dim_origem_contabil.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "dim_centro_custo",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/dim_centro_custo.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "dim_centro_custo_pessoa",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/dim_centro_custo_pessoa.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "dim_conta_dre",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/dim_conta_dre.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "dim_linha_dre",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/dim_linha_dre.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_contab_item",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_contab_item.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_contab_documento",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_contab_documento.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_dre_contabil",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_dre_contabil.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_dre_documento",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_dre_documento.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "ponte_lancamento_documento_carga",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/ponte_lancamento_documento_carga.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_dre_ajuste_manual",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_dre_ajuste_manual.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_conciliacao_multi_kmm",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_conciliacao_multi_kmm.sql"
+  },
+  {
+    "inc": 0,
+    "bucket_gold": "cootravale-layer-gold",
+    "table": "fato_ligacao_contabil",
+    "database": "gold",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/gold/{env}/fato_ligacao_contabil.sql"
+  }
+]

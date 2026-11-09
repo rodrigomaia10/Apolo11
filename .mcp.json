@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "servidor_transportadora": {
+      "type": "stdio",
+      "command": "wsl",
+      "args": [
+        "-d",
+        "Ubuntu-22.04",
+        "-e",
+        "bash",
+        "-c",
+        "cd /home/maia_rodrigo/agente-cooperado && /home/maia_rodrigo/agente-cooperado/.venv/bin/python servidor_mcp.py"
+      ],
+      "env": {}
+    },
+    "powerbi-modeling-mcp": {
+      "command": "C:\\Users\\rodrigo.maia\\.vscode\\extensions\\analysis-services.powerbi-modeling-mcp-0.4.0-win32-x64\\server\\powerbi-modeling-mcp.exe",
+      "args": [],
+      "env": {}
+    },
+    "pbi-connection": {
+      "type": "stdio",
+      "command": "C:/project/pbi-mcp-server/.venv/Scripts/python.exe",
+      "args": ["C:/project/pbi-mcp-server/server.py"]
+    }
+  }
+}

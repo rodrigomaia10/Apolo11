@@ -1,0 +1,255 @@
+/// Liga cada linha do faturamento operacional (CT-e/NF) aos lançamentos contábeis do KMM: receita contábil do documento e custo contábil do contrato. Fonte: hml_gold.vw_fato_ligacao_contabil (lançamentos contábeis disponíveis desde 01/05/2026; contratos desde 18/05).
+table LigacaoContabil
+	lineageTag: 0ae69021-0165-4618-9456-b1f6a0ce4c29
+
+	/// Receita lançada na contabilidade (conta 3.1.1.01) dos CT-e e NF do faturamento operacional, pelo mês da emissão. Mesma base do Faturamento Operacional (Painel): CT-e/NF, status A/S, no painel. Segue o filtro de cliente.
+	measure 'Receita Contábil (CT-e e NF)' = VAR cli = CALCULATETABLE(VALUES(Documentos[grupo_tomador]), REMOVEFILTERS(Calendario)) RETURN IF(ISFILTERED(Documentos[grupo_tomador]), CALCULATE(SUM(LigacaoContabil[receita_contabil_rateada]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", TREATAS(cli, LigacaoContabil[grupo_tomador])), CALCULATE(SUM(LigacaoContabil[receita_contabil_rateada]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM"))
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: 52a2c50e-e637-4c38-adf8-664a38c09a22
+
+	/// Receita contábil menos Faturamento Operacional (Painel). Negativo = parte do faturamento operacional ainda sem lançamento contábil ligado.
+	measure 'Diferença Contábil x Operacional' = [Receita Contábil (CT-e e NF)] - [Faturamento Operacional (Painel)]
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: e4894737-7a30-4d40-877e-77a0e9bd674b
+
+	/// Receita contábil dividida pelo Faturamento Operacional (Painel).
+	measure '% Operacional na Contabilidade' = DIVIDE([Receita Contábil (CT-e e NF)], [Faturamento Operacional (Painel)])
+		formatString: 0.00%;-0.00%;0.00%
+		displayFolder: Conferência contábil
+		lineageTag: 1ff9cb55-c962-4891-a9ad-3a78fd79f2e3
+
+	/// Quantidade de documentos do painel (CT-e/NF, status A/S) sem lançamento de receita na contabilidade no mesmo mês. Meses sem contabilidade carregada (a partir de out/26) aparecem todos como sem lançamento.
+	measure 'Documentos sem Receita Contábil' = VAR cli = CALCULATETABLE(VALUES(Documentos[grupo_tomador]), REMOVEFILTERS(Calendario)) RETURN IF(ISFILTERED(Documentos[grupo_tomador]), CALCULATE(DISTINCTCOUNT(LigacaoContabil[con_codigo]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", LigacaoContabil[receita_na_contabilidade] = "NAO", TREATAS(cli, LigacaoContabil[grupo_tomador])), CALCULATE(DISTINCTCOUNT(LigacaoContabil[con_codigo]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", LigacaoContabil[receita_na_contabilidade] = "NAO"))
+		formatString: #,##0
+		displayFolder: Conferência contábil
+		lineageTag: e234585b-7e72-4a7d-aa0b-93774d65e564
+
+	/// Valor do painel dos documentos sem lançamento de receita na contabilidade no mesmo mês, cada documento uma vez.
+	measure 'Faturamento Operacional sem Receita Contábil' = VAR cli = CALCULATETABLE(VALUES(Documentos[grupo_tomador]), REMOVEFILTERS(Calendario)) RETURN IF(ISFILTERED(Documentos[grupo_tomador]), CALCULATE(SUMX(SUMMARIZE(LigacaoContabil, LigacaoContabil[tipo_analise], LigacaoContabil[con_codigo]), CALCULATE(MAX(LigacaoContabil[vlr_painel_view]))), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", LigacaoContabil[receita_na_contabilidade] = "NAO", TREATAS(cli, LigacaoContabil[grupo_tomador])), CALCULATE(SUMX(SUMMARIZE(LigacaoContabil, LigacaoContabil[tipo_analise], LigacaoContabil[con_codigo]), CALCULATE(MAX(LigacaoContabil[vlr_painel_view]))), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", LigacaoContabil[receita_na_contabilidade] = "NAO"))
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: 8c0dd725-bd32-4fbc-bf51-214c8cf8c988
+
+	/// Custo de frete dos contratos lançado na contabilidade (conta 3.1.2.05, origem Contrato de Transporte), rateado pelas linhas de cada contrato. Contratos lançados desde 18/05/2026. Segue o filtro de cliente.
+	measure 'Custo Contábil dos Contratos (frete)' = VAR cli = CALCULATETABLE(VALUES(Documentos[grupo_tomador]), REMOVEFILTERS(Calendario)) RETURN IF(ISFILTERED(Documentos[grupo_tomador]), CALCULATE(SUM(LigacaoContabil[custo_contabil_contrato_rateado]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", TREATAS(cli, LigacaoContabil[grupo_tomador])), CALCULATE(SUM(LigacaoContabil[custo_contabil_contrato_rateado]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM"))
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: 88b0a140-d9f8-4196-8d4e-0c80e3c80645
+
+	/// Itens dos contratos (pedágio e similares) lançados na contabilidade, rateados pelas linhas de cada contrato.
+	measure 'Custo Contábil dos Contratos (itens)' = VAR cli = CALCULATETABLE(VALUES(Documentos[grupo_tomador]), REMOVEFILTERS(Calendario)) RETURN IF(ISFILTERED(Documentos[grupo_tomador]), CALCULATE(SUM(LigacaoContabil[custo_contabil_contrato_item_rateado]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", TREATAS(cli, LigacaoContabil[grupo_tomador])), CALCULATE(SUM(LigacaoContabil[custo_contabil_contrato_item_rateado]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM"))
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: 02d7b03f-6fb1-4754-9dde-81194c2129ff
+
+	/// Frete + itens dos contratos na contabilidade.
+	measure 'Custo Contábil Total' = [Custo Contábil dos Contratos (frete)] + [Custo Contábil dos Contratos (itens)]
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: 3a998f9a-9273-4492-958f-732dec57c432
+
+	/// (Receita contábil - custo contábil total) / receita contábil. Em maio o custo está incompleto (contratos lançados desde 18/05).
+	measure 'Margem Contábil %' = DIVIDE([Receita Contábil (CT-e e NF)] - [Custo Contábil Total], [Receita Contábil (CT-e e NF)])
+		formatString: 0.00%;-0.00%;0.00%
+		displayFolder: Conferência contábil
+		lineageTag: f6981a48-d168-445a-8eba-1c2840d276b4
+
+	/// Custo contábil total menos Custo Operacional (conciliação: frete + ocorrência).
+	measure 'Custo Contábil menos Custo Operacional' = [Custo Contábil Total] - [Custo Operacional]
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Conferência contábil
+		lineageTag: 5a8e3141-af52-4094-87e7-71c160c9ffca
+
+	/// Deduções da receita (ICMS, PIS/COFINS, ISS, menos crédito presumido) lançadas no próprio CT-e/NF, valor negativo. Mesma base do Faturamento Operacional (Painel). Segue o filtro de cliente.
+	measure 'Deduções do Documento' = VAR cli = CALCULATETABLE(VALUES(Documentos[grupo_tomador]), REMOVEFILTERS(Calendario)) RETURN IF(ISFILTERED(Documentos[grupo_tomador]), CALCULATE(SUM(LigacaoContabil[deducoes_contabeis_rateadas]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM", TREATAS(cli, LigacaoContabil[grupo_tomador])), CALCULATE(SUM(LigacaoContabil[deducoes_contabeis_rateadas]), LigacaoContabil[tipo_analise] IN {"CT-e", "NF"}, LigacaoContabil[con_status] IN {"A", "S"}, LigacaoContabil[no_painel] = "SIM"))
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: Margem por cliente
+		lineageTag: 8ec0d4c5-0470-420c-a730-af7ddc688105
+
+	column tipo_analise
+		dataType: string
+		lineageTag: cf5588b9-4349-4e5c-a5f9-8e3d44d2d1fa
+		summarizeBy: none
+		sourceColumn: tipo_analise
+
+	column con_codigo
+		dataType: int64
+		lineageTag: a1466f97-632c-48e3-ae2a-6932e480ad87
+		summarizeBy: none
+		sourceColumn: con_codigo
+
+	column con_status
+		dataType: string
+		lineageTag: e2dc175d-c9b0-4280-8e59-2f4cbc07932f
+		summarizeBy: none
+		sourceColumn: con_status
+
+	column data_emissao
+		dataType: dateTime
+		formatString: dd/MM/yyyy
+		lineageTag: 0302a8ca-bb92-4cee-aa28-b562141d107f
+		summarizeBy: none
+		sourceColumn: data_emissao
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column cte
+		dataType: string
+		lineageTag: c102ee6c-b75c-4079-94a2-b760c5b4ae1b
+		summarizeBy: none
+		sourceColumn: cte
+
+	column tipodocumento
+		dataType: string
+		lineageTag: 58c61520-413c-4569-b55b-04057ecaaf0a
+		summarizeBy: none
+		sourceColumn: tipodocumento
+
+	column cnpj_tomador
+		dataType: string
+		lineageTag: 6f873277-ed97-4624-86e2-5bf68a227deb
+		summarizeBy: none
+		sourceColumn: cnpj_tomador
+
+	column nome_tomador
+		dataType: string
+		lineageTag: 54206ea0-cdfa-4a59-a835-308846b22849
+		summarizeBy: none
+		sourceColumn: nome_tomador
+
+	column grupo_tomador
+		dataType: string
+		lineageTag: 0d298f39-95fe-4e40-8baf-52f4e9b64951
+		summarizeBy: none
+		sourceColumn: grupo_tomador
+
+	column num_fatura
+		dataType: string
+		lineageTag: b43faf92-e103-4c6c-af74-f307d5d25a45
+		summarizeBy: none
+		sourceColumn: num_fatura
+
+	column contrato
+		dataType: string
+		lineageTag: 06cd46db-289a-4628-b778-70e90ddb3724
+		summarizeBy: none
+		sourceColumn: contrato
+
+	column num_titulo_pagar
+		dataType: string
+		lineageTag: 9f21c7b6-d7e1-4b0f-b9a2-159fbcafb9c9
+		summarizeBy: none
+		sourceColumn: num_titulo_pagar
+
+	column valor_documento_kmm
+		dataType: double
+		isHidden
+		lineageTag: db65943c-5d46-4ed1-802e-61fef883865f
+		summarizeBy: none
+		sourceColumn: valor_documento_kmm
+
+	column no_painel
+		dataType: string
+		lineageTag: 68703852-afc4-41a3-94c6-01c1a424ef74
+		summarizeBy: none
+		sourceColumn: no_painel
+
+	column vlr_painel_view
+		dataType: double
+		isHidden
+		lineageTag: 3952b3ef-58a9-4025-902a-e20d0f549ad6
+		summarizeBy: none
+		sourceColumn: vlr_painel_view
+
+	column receita_na_contabilidade
+		dataType: string
+		lineageTag: 7a870afa-bdd8-4b77-af95-ce0f65624c05
+		summarizeBy: none
+		sourceColumn: receita_na_contabilidade
+
+	column receita_contabil_documento
+		dataType: double
+		isHidden
+		lineageTag: 276dc88d-b8d1-442e-affd-b25eb872dfb8
+		summarizeBy: none
+		sourceColumn: receita_contabil_documento
+
+	column receita_contabil_rateada
+		dataType: double
+		isHidden
+		lineageTag: e87b0afe-e6d5-4127-96df-70154d2451fa
+		summarizeBy: none
+		sourceColumn: receita_contabil_rateada
+
+	column dif_receita_contabil_x_painel
+		dataType: double
+		isHidden
+		lineageTag: 0a8c1580-a7c9-4048-848d-8401afc1a9f6
+		summarizeBy: none
+		sourceColumn: dif_receita_contabil_x_painel
+
+	column chave_documento_repetida
+		dataType: string
+		lineageTag: 3d1fbde3-1f11-43b3-a1d2-5a4386082a32
+		summarizeBy: none
+		sourceColumn: chave_documento_repetida
+
+	column custo_na_contabilidade
+		dataType: string
+		lineageTag: c06628e0-c2da-4a3c-95fb-7e355b649d1d
+		summarizeBy: none
+		sourceColumn: custo_na_contabilidade
+
+	column custo_contabil_contrato
+		dataType: double
+		isHidden
+		lineageTag: a8462180-a019-47f0-8489-dc10d7849738
+		summarizeBy: none
+		sourceColumn: custo_contabil_contrato
+
+	column custo_contabil_contrato_rateado
+		dataType: double
+		isHidden
+		lineageTag: 4eda7fbd-5b42-4333-9fef-cff5c0187752
+		summarizeBy: none
+		sourceColumn: custo_contabil_contrato_rateado
+
+	column custo_contabil_contrato_item
+		dataType: double
+		isHidden
+		lineageTag: 87c343d9-3f29-4a3a-9587-9adb36955b6f
+		summarizeBy: none
+		sourceColumn: custo_contabil_contrato_item
+
+	column custo_contabil_contrato_item_rateado
+		dataType: double
+		isHidden
+		lineageTag: f503635f-536d-4e9c-af45-23081b88f768
+		summarizeBy: none
+		sourceColumn: custo_contabil_contrato_item_rateado
+
+	column qtd_linhas_contrato
+		dataType: int64
+		isHidden
+		lineageTag: 62381d20-2237-4f97-bda7-95c6ec4aaf7b
+		summarizeBy: none
+		sourceColumn: qtd_linhas_contrato
+
+	column deducoes_contabeis_rateadas
+		dataType: double
+		isHidden
+		lineageTag: 969efc75-bf7b-461e-be84-8122632ed841
+		summarizeBy: none
+		sourceColumn: deducoes_contabeis_rateadas
+
+	partition LigacaoContabil = m
+		mode: import
+		source =
+				let
+				    Fonte = Odbc.Query("dsn=Athena_Cootravale_Producao", "select tipo_analise, con_codigo, con_status, data_emissao, cte, tipodocumento, cnpj_tomador, nome_tomador, grupo_tomador, num_fatura, contrato, num_titulo_pagar, valor_documento_kmm, no_painel, vlr_painel_view, receita_na_contabilidade, receita_contabil_documento, receita_contabil_rateada, dif_receita_contabil_x_painel, chave_documento_repetida, custo_na_contabilidade, custo_contabil_contrato, custo_contabil_contrato_rateado, custo_contabil_contrato_item, custo_contabil_contrato_item_rateado, qtd_linhas_contrato, deducoes_contabeis_rateadas from (WITH contab AS ( SELECT f.num_lancamento_it AS contabilizacao_id, o.origem AS origem, c.classificacao AS classificacao, CAST(b.num_documento AS varchar) AS num_documento, regexp_replace(CAST(pe.cnpj_cpf AS varchar), '[^0-9]', '') AS cnpj, regexp_extract(b.historico, '\[(\d+)\]', 1) AS contrato_hist, f.valor_credito AS cr, f.valor_debito AS db, f.mes_lancamento AS mes_lanc FROM prd_gold.fato_contab_item f JOIN prd_gold.dim_conta c ON c.sk_conta = f.sk_conta JOIN prd_gold.dim_origem_contabil o ON o.sk_origem = f.sk_origem JOIN prd_bronze.kmm_contab_contab_lancamento_it b ON b.num_lancamento_it = f.num_lancamento_it LEFT JOIN prd_silver.kmm_pessoa pe ON pe.cod_pessoa = b.cod_participante WHERE o.origem IN ('Conhecimento de Transporte', 'Nota Fiscal de E/S', 'Contrato de Transporte', 'Contrato de Transporte - Item') AND (c.classificacao LIKE '3.1.1.01%' OR c.classificacao LIKE '3.1.2.05%' OR c.classificacao IN ('3.1.1.02.00001', '3.1.1.02.00002', '3.1.1.02.00003', '3.1.1.02.00006', '3.1.1.02.00008', '3.1.1.02.00011', '3.1.1.02.00013', '3.1.1.02.00015')) ), rec AS ( SELECT (CASE WHEN origem = 'Conhecimento de Transporte' THEN 'CT-e' ELSE 'NF' END) tipo_analise, num_documento num, cnpj, mes_lanc, SUM(CASE WHEN classificacao LIKE '3.1.1.01%' THEN (cr - db) END) receita_contabil, SUM(CASE WHEN classificacao LIKE '3.1.1.01%' THEN 1 ELSE 0 END) itens_receita, SUM(CASE WHEN classificacao LIKE '3.1.1.02%' THEN (cr - db) ELSE 0 END) deducoes_contabeis FROM contab WHERE (classificacao LIKE '3.1.1.01%' OR classificacao LIKE '3.1.1.02%') AND origem IN ('Conhecimento de Transporte', 'Nota Fiscal de E/S') GROUP BY 1, 2, 3, 4 ), cst AS ( SELECT contrato_hist contrato, SUM(CASE WHEN origem = 'Contrato de Transporte' THEN (db - cr) ELSE 0 END) custo_contrato, SUM(CASE WHEN origem = 'Contrato de Transporte - Item' THEN (db - cr) ELSE 0 END) custo_contrato_item, COUNT(*) itens_custo FROM contab WHERE classificacao LIKE '3.1.2.05%' AND origem IN ('Contrato de Transporte', 'Contrato de Transporte - Item') GROUP BY 1 ), c AS ( SELECT tipo_analise, con_codigo, con_status, data_emissao, ano_emissao, CAST(cte AS varchar) cte, CAST(tipodocumento AS varchar) tipodocumento, CAST(kmm_doc_id AS varchar) kmm_doc_id, car_codigo_carga_embarcador, cnpj_tomador, nome_tomador, grupo_tomador, tem_grupo_pagador, filial_contabil, CAST(num_fatura AS varchar) num_fatura, CAST(ids_titulo_receber AS varchar) ids_titulo_receber, CAST(contrato AS varchar) contrato, CAST(num_titulo_pagar AS varchar) num_titulo_pagar, valor_documento_kmm, valor_contrato_liquido, valor_contrato_bruto, no_painel, vlr_painel_view, date_format(data_emissao, '%Y-%m') mes_emissao, split_part(CAST(cte AS varchar), '-', 2) num_doc, regexp_replace(CAST(cnpj_tomador AS varchar), '[^0-9]', '') cnpj_tom FROM hml_gold.fato_conciliacao_multi_kmm ), j AS ( SELECT c.*, rec.receita_contabil, rec.itens_receita, rec.deducoes_contabeis, cst.custo_contrato, cst.custo_contrato_item, cst.itens_custo, COUNT(*) OVER (PARTITION BY c.tipo_analise, c.num_doc, c.cnpj_tom, c.mes_emissao) qtd_linhas_chave_doc, COUNT(*) OVER (PARTITION BY c.contrato) qtd_linhas_contrato FROM c LEFT JOIN rec ON rec.tipo_analise = c.tipo_analise AND rec.num = c.num_doc AND rec.cnpj = c.cnpj_tom AND rec.mes_lanc = c.mes_emissao LEFT JOIN cst ON cst.contrato = c.contrato ) SELECT tipo_analise, con_codigo, con_status, data_emissao, ano_emissao, cte, tipodocumento, kmm_doc_id, car_codigo_carga_embarcador, cnpj_tomador, nome_tomador, grupo_tomador, tem_grupo_pagador, filial_contabil, num_fatura, ids_titulo_receber, contrato, num_titulo_pagar, valor_documento_kmm, valor_contrato_liquido, valor_contrato_bruto, no_painel, vlr_painel_view, (CASE WHEN receita_contabil IS NULL THEN 'NAO' ELSE 'SIM' END) receita_na_contabilidade, receita_contabil receita_contabil_documento, (receita_contabil / qtd_linhas_chave_doc) receita_contabil_rateada, ((receita_contabil / qtd_linhas_chave_doc) - COALESCE(vlr_painel_view, 0)) dif_receita_contabil_x_painel, (CASE WHEN qtd_linhas_chave_doc > 1 THEN 'SIM' ELSE 'NAO' END) chave_documento_repetida, (CASE WHEN custo_contrato IS NULL THEN 'NAO' ELSE 'SIM' END) custo_na_contabilidade, custo_contrato custo_contabil_contrato, (custo_contrato / qtd_linhas_contrato) custo_contabil_contrato_rateado, custo_contrato_item custo_contabil_contrato_item, (custo_contrato_item / qtd_linhas_contrato) custo_contabil_contrato_item_rateado, qtd_linhas_contrato, deducoes_contabeis deducoes_contabeis_documento, (deducoes_contabeis / qtd_linhas_chave_doc) deducoes_contabeis_rateadas FROM j) t"),
+				    Tipos = Table.TransformColumnTypes(Fonte, {{"data_emissao", type date}})
+				in
+				    Tipos
+

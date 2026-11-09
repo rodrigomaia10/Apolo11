@@ -1,0 +1,140 @@
+/// As 14 linhas da cascata do DRE (ROB, ROL, Margem de Contribuição Bruta, Resultado Operacional, Sobra Gerencial, Sobra Contábil) e as medidas que as calculam.
+table DreLinhas
+	lineageTag: 4f909a9e-bdc3-43e7-b19f-a32ec5334e88
+
+	/// Valor da linha do DRE calculado só com a contabilidade do KMM (créditos menos débitos). Subtotais são cumulativos, como no DRE gerencial.
+	measure 'DRE Linha (KMM)' = VAR c = SELECTEDVALUE(DreLinhas[codigo]) VAR ing = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "INGRESSOS E RECEITAS DE FRETE") VAR rep = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "REPASSE LIQUIDO") VAR ded = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "DEDUÇÕES DA RECEITA") VAR csp = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "CUSTOS DOS SERVIÇOS PRESTADOS") VAR dop = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "DESPESAS OPERACIONAIS") VAR ind = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "INDEDUTÍVEIS E TRIBUTÁRIAS") VAR fin = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "RECEITAS E DESPESAS FINANCEIRAS") VAR out = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[nivel_1] = "OUTRAS RECEITAS/DESPESAS") RETURN SWITCH(c, 1, ing + rep, 2, ing, 3, rep, 4, ded, 5, ing + rep + ded, 6, csp, 7, ing + rep + ded + csp, 8, dop, 9, ind, 10, ing + rep + ded + csp + dop + ind, 11, fin, 12, ing + rep + ded + csp + dop + ind + fin, 13, out, 14, ing + rep + ded + csp + dop + ind + fin + out)
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: 55a00178-fba7-4dd3-8baf-95e77a6487ca
+
+	/// Valor da mesma linha no DRE gerencial (foto de 20/10/2026, jul a set/26).
+	measure 'DRE Linha (DRE)' = VAR c = SELECTEDVALUE(DreLinhas[codigo]) VAR ing = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "INGRESSOS E RECEITAS DE FRETE") VAR rep = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "REPASSE LIQUIDO") VAR ded = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "DEDUÇÕES DA RECEITA") VAR csp = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "CUSTOS DOS SERVIÇOS PRESTADOS") VAR dop = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "DESPESAS OPERACIONAIS") VAR ind = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "INDEDUTÍVEIS E TRIBUTÁRIAS") VAR fin = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "RECEITAS E DESPESAS FINANCEIRAS") VAR out = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[nivel_1] = "OUTRAS RECEITAS/DESPESAS") RETURN SWITCH(c, 1, ing + rep, 2, ing, 3, rep, 4, ded, 5, ing + rep + ded, 6, csp, 7, ing + rep + ded + csp, 8, dop, 9, ind, 10, ing + rep + ded + csp + dop + ind, 11, fin, 12, ing + rep + ded + csp + dop + ind + fin, 13, out, 14, ing + rep + ded + csp + dop + ind + fin + out)
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: b1490ac4-0485-41fb-bfef-2396ee9400d6
+
+	/// Parte do DRE gerencial que não existe no KMM (linhas sem origem): ajustes manuais da controladoria.
+	measure 'DRE Linha (ajuste manual)' = VAR c = SELECTEDVALUE(DreLinhas[codigo]) VAR ing = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "INGRESSOS E RECEITAS DE FRETE") VAR rep = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "REPASSE LIQUIDO") VAR ded = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "DEDUÇÕES DA RECEITA") VAR csp = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "CUSTOS DOS SERVIÇOS PRESTADOS") VAR dop = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "DESPESAS OPERACIONAIS") VAR ind = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "INDEDUTÍVEIS E TRIBUTÁRIAS") VAR fin = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "RECEITAS E DESPESAS FINANCEIRAS") VAR out = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DreContabil[status] = "AJUSTE MANUAL DO DRE", DrePlano[nivel_1] = "OUTRAS RECEITAS/DESPESAS") RETURN SWITCH(c, 1, ing + rep, 2, ing, 3, rep, 4, ded, 5, ing + rep + ded, 6, csp, 7, ing + rep + ded + csp, 8, dop, 9, ind, 10, ing + rep + ded + csp + dop + ind, 11, fin, 12, ing + rep + ded + csp + dop + ind + fin, 13, out, 14, ing + rep + ded + csp + dop + ind + fin + out)
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: c68b097c-6ad7-41ad-a798-2c5db15f91e6
+
+	/// KMM menos DRE.
+	measure 'DRE Linha Diferença' = [DRE Linha (KMM)] - [DRE Linha (DRE)]
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: 31afa508-48a4-4752-8ad1-4deb46fdacfe
+
+	/// KMM menos o DRE sem os ajustes manuais. Se não é zero, há diferença real entre o KMM e o DRE (hoje: NF de E/S de set).
+	measure 'DRE Linha Diferença sem Ajuste Manual' = [DRE Linha (KMM)] - ([DRE Linha (DRE)] - [DRE Linha (ajuste manual)])
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: 41f8312c-b284-4806-8e2b-c11508a04d86
+
+	/// Linha dividida pela Receita Total (ROB) do KMM.
+	measure 'DRE Linha % da ROB (KMM)' = DIVIDE([DRE Linha (KMM)], CALCULATE([DRE Linha (KMM)], ALL(DreLinhas), DreLinhas[codigo] = 1))
+		formatString: 0.0%
+		displayFolder: DRE em cascata
+		lineageTag: 9c4dd2dc-f271-4257-a91d-71e25ef1469d
+
+	/// Texto que diz se a linha fecha com o DRE depois de tirar os ajustes manuais.
+	measure 'DRE Linha Situação' = VAR d = [DRE Linha Diferença sem Ajuste Manual] RETURN IF(ISBLANK(d), "", IF(ABS(d) < 1, "fecha com o DRE (após ajustes manuais)", "DIFERE R$ " & FORMAT(ABS(d), "#,##0.00")))
+		displayFolder: DRE em cascata
+		lineageTag: 6aabe173-2950-4bcc-9c41-793682c940a3
+
+	/// Margem de Contribuição Bruta com a base KMM.
+	measure 'Margem de Contribuição Bruta (KMM)' = CALCULATE([DRE Linha (KMM)], ALL(DreLinhas), DreLinhas[codigo] = 7)
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: 8239754f-04aa-4560-a704-5ea1992cf0d3
+
+	/// Margem de Contribuição Bruta do DRE gerencial.
+	measure 'Margem de Contribuição Bruta (DRE)' = CALCULATE([DRE Linha (DRE)], ALL(DreLinhas), DreLinhas[codigo] = 7)
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: abe3aabb-b84f-4e9b-b85f-f496d1484147
+
+	/// Mesma fórmula do DRE: soma das contas marcadas na margem bruta dividida pela soma das contas marcadas XD, com a base KMM.
+	measure 'Margem de Contribuição % (KMM, método DRE)' = DIVIDE(CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[margem_bruta] <> ""), CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[margem_bruta] = "XD"))
+		formatString: 0.00%
+		displayFolder: DRE em cascata
+		lineageTag: 82dd8bea-069f-47c0-8f4f-5f9c404d4dda
+
+	/// Margem bruta % do DRE gerencial, recalculada aqui com a mesma fórmula.
+	measure 'Margem de Contribuição % (DRE)' = DIVIDE(CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[margem_bruta] <> ""), CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[margem_bruta] = "XD"))
+		formatString: 0.00%
+		displayFolder: DRE em cascata
+		lineageTag: 41bdc2a1-4851-430e-b131-c41a394cc657
+
+	/// Margem operacional do DRE, com a base KMM.
+	measure 'Margem Operacional % (KMM, método DRE)' = DIVIDE(CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[margem_operacional] <> ""), CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", DrePlano[margem_operacional] = "XD"))
+		formatString: 0.00%
+		displayFolder: DRE em cascata
+		lineageTag: a93d4d7a-12bb-4c30-9145-2cc1e4003f56
+
+	/// Margem operacional % do DRE gerencial.
+	measure 'Margem Operacional % (DRE)' = DIVIDE(CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[margem_operacional] <> ""), CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "DRE", DrePlano[margem_operacional] = "XD"))
+		formatString: 0.00%
+		displayFolder: DRE em cascata
+		lineageTag: 74a0ad26-f5ee-4282-8160-3f35891aba1c
+
+	/// Valor do KMM em contas que não estão no plano de contas do DRE (devem ser zero).
+	measure 'Contas sem Grupo no DRE (KMM)' = CALCULATE(SUM(DreContabil[valor]), DreContabil[fonte] = "KMM", ISBLANK(DrePlano[nivel_1]))
+		formatString: "R$"\ #,##0.00;-"R$"\ #,##0.00
+		displayFolder: DRE em cascata
+		lineageTag: 7c6f00b1-eee3-4a27-80c5-0ed31c7c9446
+
+	column codigo
+		dataType: int64
+		formatString: 0
+		lineageTag: b2525319-9506-4378-9860-ecf95b408fdd
+		summarizeBy: none
+		sourceColumn: codigo
+
+	column linha
+		dataType: string
+		lineageTag: ecfe7f6e-fe82-4845-ae8a-129da17148e0
+		summarizeBy: none
+		sourceColumn: linha
+
+	column subtotal
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 367003f8-fc46-49ae-aa84-6789a0306760
+		summarizeBy: none
+		sourceColumn: subtotal
+
+	column sinal
+		dataType: string
+		isHidden
+		lineageTag: 19fc9756-0503-448d-b2a4-9038bd79cf59
+		summarizeBy: none
+		sourceColumn: sinal
+
+	partition DreLinhas = m
+		mode: import
+		source =
+				let
+				    Fonte = #table(type table [codigo = Int64.Type, linha = text, subtotal = Int64.Type, sinal = text], {
+				        {1, "RECEITA TOTAL (ROB)", 1, "="},
+				        {2, "INGRESSOS E RECEITAS DE FRETE", 0, "+"},
+				        {3, "REPASSE LÍQUIDO", 0, "+"},
+				        {4, "DEDUÇÕES DA RECEITA", 0, "-"},
+				        {5, "RECEITAS OPERACIONAIS LÍQUIDAS (ROL)", 1, "="},
+				        {6, "CUSTOS DOS SERVIÇOS PRESTADOS", 0, "-"},
+				        {7, "MARGEM DE CONTRIBUIÇÃO BRUTA", 1, "="},
+				        {8, "DESPESAS OPERACIONAIS", 0, "-"},
+				        {9, "INDEDUTÍVEIS E TRIBUTÁRIAS", 0, "-"},
+				        {10, "RESULTADO OPERACIONAL", 1, "="},
+				        {11, "RECEITAS E DESPESAS FINANCEIRAS", 0, "-"},
+				        {12, "SOBRA GERENCIAL", 1, "="},
+				        {13, "OUTRAS RECEITAS/DESPESAS", 0, "-"},
+				        {14, "SOBRA CONTÁBIL", 1, "="}
+				    })
+				in
+				    Fonte
+
+	annotation PBI_ResultType = Table
+

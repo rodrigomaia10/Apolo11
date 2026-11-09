@@ -1,0 +1,1871 @@
+-- =====================================================================
+-- CONCILIACAO MULTI x KMM  -- CT-e + NF, com numero de fatura
+-- Arbitro do tipo: prd_gold.fato_operacional.tipo_documento
+-- =====================================================================
+WITH
+-- ============================================================
+-- 1. MAPEAMENTO DE FILIAL (KMM)
+-- ============================================================
+mapa_filial_kmm AS (
+    SELECT
+        cc.cod_centro_custo,
+        neg.cod_unidade_negocio,
+        neg.unidade_negocio,
+        COALESCE(fil_path1.sk_filial, fil_path2.sk_filial)       AS sk_filial,
+        COALESCE(fil_path1.nome_display, fil_path2.nome_display) AS filial_nome,
+        CASE
+            WHEN fil_path1.sk_filial IS NOT NULL THEN 'ORGANOGRAMA'
+            WHEN fil_path2.sk_filial IS NOT NULL THEN 'CODIGO_CLIENTE'
+            ELSE 'SEM MAPEAMENTO'
+        END AS origem_mapeamento
+    FROM prd_bronze.kmm_kss_centro_custo cc
+    JOIN prd_bronze.kmm_kss_organograma org      ON cc.cod_centro_custo = org.cod_centro_custo
+    JOIN prd_bronze.kmm_kss_unidade_negocio neg  ON org.cod_unidade_negocio = neg.cod_unidade_negocio
+    LEFT JOIN prd_bronze.multi_dbo_t_centro_custo_viagem cen1
+        ON try_cast(neg.cod_unidade_negocio AS varchar) = cen1.ccv_codigo_integracao
+       AND neg.cod_unidade_negocio != 1
+    LEFT JOIN prd_gold.dim_filial fil_path1 ON fil_path1.ccv_codigo = cen1.ccv_codigo
+    LEFT JOIN prd_bronze.multi_dbo_t_centro_custo_viagem cen2
+        ON cc.codigo_cliente = cen2.ccv_codigo_integracao
+       AND neg.cod_unidade_negocio = 1
+    LEFT JOIN prd_gold.dim_filial fil_path2 ON fil_path2.ccv_codigo = cen2.ccv_codigo
+),
+mapa AS (
+    SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY cod_centro_custo
+                                     ORDER BY sk_filial NULLS LAST) AS rn
+        FROM mapa_filial_kmm
+    ) WHERE rn = 1
+),
+
+-- ============================================================
+-- 2. LADO KMM -- CT-e
+-- ============================================================
+kmm_enriquecido AS (
+    SELECT
+        kc.conhecimento_id, kc.serie, kc.num_conhecimento, kc.cob_cnpj_cpf,
+        kc.cod_centro_custo, kc.cancelado,
+        -- quem lancou o documento no KMM: INTEGRADOR_MULTI = integrado pelo sistema; nome de pessoa = lancamento manual
+        kc.user_insert AS usuario_doc_kmm,
+        DATE(kc.data_emissao) AS data_emissao_kmm,
+        kc.total_conhecimento AS valor_documento_kmm,
+        kc.valor_icms         AS valor_icms_kmm,
+        kc.valor_iss          AS valor_iss_kmm,
+        -- num_conhecimento e decimal(38,18) no bronze: CAST direto pra varchar gera
+        -- '100-42246.000000000000000000' e nunca bate com o cte do Multi ('100-42246').
+        -- Passa por bigint antes (sem isso o P1 nao casava nenhum CT-e).
+        CONCAT(CAST(kc.serie AS varchar), '-', CAST(CAST(kc.num_conhecimento AS bigint) AS varchar)) AS cte_chave,
+        mf.sk_filial AS sk_filial_kmm, mf.filial_nome AS filial_kmm,
+        mf.cod_unidade_negocio, mf.unidade_negocio, mf.origem_mapeamento
+    FROM prd_bronze.kmm_fiscal_conhecimento kc
+    LEFT JOIN mapa mf ON kc.cod_centro_custo = mf.cod_centro_custo
+),
+
+-- ============================================================
+-- 3. FLAGS DE CARGA / FILIAL (lado Multi)
+-- ============================================================
+angeloni_ctes AS (
+    SELECT DISTINCT con_codigo
+    FROM prd_silver.operacional_por_cte
+    WHERE tipo_de_carga LIKE '%ANGELONI%'
+       OR tipo_operacao LIKE '%ANGELONI%'
+),
+-- qtd de filiais DISTINTAS por con_codigo -- separado do pick de sk_filial
+-- porque prd_gold.fato_operacional tem linhas duplicadas de verdade (mesmo
+-- con_codigo, mesma sk_filial, repetida) em ~82 mil casos; um COUNT(*) sem
+-- DISTINCT contava essas duplicatas como se fossem filiais diferentes (ver
+-- car_codigo_carga_embarcador = 190415: 2 linhas identicas, sk_filial=2 as
+-- duas, marcava filial_duplicada='SIM' por engano). So ~332 con_codigo tem
+-- filial de verdade diferente.
+-- OBS: alem de duplicata pura, uma carga pode ter 2+ pedidos legitimos (um
+-- deles cancelado, ped_situacao=2) -- nesse caso sk_filial pode divergir de
+-- verdade entre os pedidos. O desempate abaixo (filial_multi_map) e no
+-- doc_multi sempre prefere o pedido NAO cancelado, entao o valor exibido
+-- reflete o pedido ativo, nao uma escolha arbitraria entre os dois.
+filial_qtd_distinta AS (
+    SELECT con_codigo, COUNT(DISTINCT sk_filial) AS total_filiais_distintas
+    FROM prd_gold.fato_operacional
+    WHERE con_codigo IS NOT NULL
+    GROUP BY con_codigo
+),
+filial_multi_map AS (
+    SELECT t.con_codigo, t.sk_filial,
+           CASE WHEN ac.con_codigo IS NOT NULL THEN 'NAO'
+                WHEN d.total_filiais_distintas > 1 THEN 'SIM'
+                ELSE 'NAO'
+           END AS filial_duplicada
+    FROM (
+        SELECT fo.con_codigo, fo.sk_filial,
+               -- mesmo motivo do doc_multi: quando ha pedido cancelado misturado,
+               -- prefere a filial do pedido NAO cancelado
+               ROW_NUMBER() OVER (PARTITION BY fo.con_codigo
+                                  ORDER BY (CASE WHEN fo.ped_situacao = 2 THEN 1 ELSE 0 END),
+                                           fo.data_emissao ASC) AS rn
+        FROM prd_gold.fato_operacional fo
+        WHERE fo.con_codigo IS NOT NULL
+    ) t
+    JOIN filial_qtd_distinta d ON d.con_codigo = t.con_codigo
+    LEFT JOIN angeloni_ctes ac ON t.con_codigo = ac.con_codigo
+    WHERE t.rn = 1
+),
+info_carga_flags AS (
+    SELECT
+        con_codigo,
+        MAX(CASE WHEN car_situacao IN (18,13) THEN 0 ELSE 1 END)                       AS tem_ativa,
+        MIN(CASE WHEN tipodocumento IN ('DV','OST','CV','NDA','ND') THEN 1 ELSE 0 END) AS todos_nao_fiscal,
+        COUNT(DISTINCT CASE
+            WHEN tipo_de_carga  NOT LIKE '%ANGELONI%'
+             AND tipo_operacao NOT LIKE '%ANGELONI%'
+            THEN car_codigo_carga_embarcador
+        END)                                                                            AS qtd_cargas,
+        CASE WHEN COUNT(DISTINCT CASE
+                WHEN tipo_de_carga  NOT LIKE '%ANGELONI%'
+                 AND tipo_operacao NOT LIKE '%ANGELONI%'
+                THEN car_codigo_carga_embarcador
+             END) > 1 THEN 'SIM' ELSE 'NAO'
+        END                                                                             AS multiplas_cargas
+    FROM prd_silver.operacional_por_cte
+    WHERE con_codigo IS NOT NULL
+    GROUP BY con_codigo
+),
+info_carga_texto AS (
+    SELECT con_codigo, mod_abreviacao, tipodocumento
+    FROM (
+        SELECT con_codigo, mod_abreviacao, tipodocumento,
+               ROW_NUMBER() OVER (PARTITION BY con_codigo ORDER BY car_situacao DESC) AS rn
+        FROM prd_silver.operacional_por_cte
+        WHERE con_codigo IS NOT NULL
+    ) WHERE rn = 1
+),
+-- flag de NFS gerada manualmente, por carga (multi_dbo_t_carga_pedido.ped_possui_nfs_manual).
+-- car_codigo_carga_embarcador pode mapear pra mais de um car_codigo interno
+-- (reemissao/cancelamento) -- bool_or agrega: qualquer pedido da carga com a
+-- flag true ja marca a carga inteira. Confirmado contra 2 casos reais
+-- (1-10042 e 70000-23, ambos NFS manuais de verdade).
+-- grupo economico do tomador (razao social varia por CNPJ dentro do mesmo
+-- grupo, ex: NESTLE tem 69 CNPJs e 12 razoes sociais diferentes) --
+-- multi_dbo_t_grupo_pessoas_raiz_cnpj.grc_cnpj = raiz do CNPJ (8 digitos),
+-- liga em multi_dbo_t_grupo_pessoas pelo grp_codigo pra pegar o nome do
+-- grupo (grp_descricao). Cobertura: 96,4% dos cnpj_tomador batem.
+grupo_tomador AS (
+    SELECT g.grc_cnpj, gp.grp_descricao AS grupo_tomador
+    FROM prd_bronze.multi_dbo_t_grupo_pessoas_raiz_cnpj g
+    JOIN prd_bronze.multi_dbo_t_grupo_pessoas gp ON gp.grp_codigo = g.grp_codigo
+),
+nfs_manual_por_carga AS (
+    SELECT cu.car_codigo_carga_embarcador,
+           bool_or(cp.ped_possui_nfs_manual) AS ped_possui_nfs_manual
+    FROM prd_bronze.multi_dbo_t_carga cu
+    JOIN prd_bronze.multi_dbo_t_carga_pedido cp ON cp.car_codigo = cu.car_codigo
+    GROUP BY cu.car_codigo_carga_embarcador
+),
+-- registro oficial do CIOT, por DOCUMENTO (con_codigo). Historico de tentativas:
+--   1) texto "CIOT CANCELADO" em tipo_operacao_anulacao -- nao reflete o
+--      cancelamento real (340 con_codigo com esse texto, nenhum tinha CIOT
+--      proprio vinculado).
+--   2) multi_dbo_t_cte.con_ciot = multi_dbo_t_ciot.cio_numero -- valido mas
+--      quase vazio (so 4 cargas no periodo tem con_ciot preenchido).
+--   3) agregado por car_codigo_carga_embarcador (multi_dbo_t_carga_ciot) --
+--      162.825 cargas batem (bom), MAS car_codigo_carga_embarcador agrupa
+--      TODAS as reemissoes da carga -- um documento cancelado "herdava" o
+--      CIOT valido de uma reemissao ativa irma (caso real: con_codigo=843441,
+--      CT-e cancelado (car_situacao=13), CIOT do SEU PROPRIO car_codigo
+--      (371078) esta cancelado, mas o agregado por car_codigo_carga_embarcador
+--      (223335) tambem incluia o car_codigo da reemissao ativa (372437, CIOT
+--      valido), entao o cancelado aparecia com ciot='VALIDO' por engano).
+-- Caminho certo: liga pelo car_codigo ESPECIFICO desse con_codigo, via
+-- multi_dbo_t_carga_cte (con_codigo -> car_codigo), nao pelo codigo do
+-- embarcador. Isso ainda deixava ~2.292 casos de carga cancelada com CIOT
+-- "valido" -- caso real investigado (car_codigo_carga_embarcador=222787,
+-- con_codigo cancelado 837916): o cio_codigo do seu car_codigo tinha
+-- cio_numero NULL e cio_mensagem = "Falha ao efetuar o cadastro do
+-- motorista: Phone.Number: Cell phone must be length 9 and start with 9" --
+-- ou seja, o CIOT NUNCA foi emitido de verdade (falhou no cadastro), so que
+-- cio_data_cancelamento tambem fica NULL nesse caso (nao e "cancelado",
+-- e "nunca existiu"), e minha regra contava isso como ativo/valido por
+-- engano. Fix: so conta como CIOT de verdade quem tem cio_numero preenchido
+-- (11.608 registros no total sao tentativas falhas sem numero, deveriam ser
+-- ignoradas). Isso derrubou os falsos "CANCELADA + VALIDO" de 2.292 pra 15 --
+-- os 15 restantes sao CIOT de verdade (numero emitido) que ficou aberto
+-- quando a carga foi cancelada -- achado de processo real, nao bug.
+-- CIOT agregado por car_codigo (reaproveitado tambem pelo bloco SEM DOCUMENTO,
+-- que nao tem con_codigo/CT-e pra passar por multi_dbo_t_carga_cte)
+ciot_por_car_codigo AS (
+    SELECT cco.car_codigo,
+           bool_or(ciot.cio_data_cancelamento IS NULL) AS tem_ciot_ativo,
+           COUNT(ciot.cio_codigo) AS qtd_ciot
+    FROM prd_bronze.multi_dbo_t_carga_ciot cco
+    JOIN prd_bronze.multi_dbo_t_ciot ciot ON ciot.cio_codigo = cco.cio_codigo
+    WHERE ciot.cio_numero IS NOT NULL AND ciot.cio_numero <> ''
+    GROUP BY cco.car_codigo
+),
+ciot_por_documento AS (
+    SELECT cct.con_codigo, cpc.tem_ciot_ativo, cpc.qtd_ciot
+    FROM prd_bronze.multi_dbo_t_carga_cte cct
+    JOIN ciot_por_car_codigo cpc ON cpc.car_codigo = cct.car_codigo
+),
+-- cargas SEM nenhum CT-e/NF vinculado (multi_dbo_t_carga_cte nao tem
+-- linha pra esse car_codigo) -- ex: tentativa de carga cancelada antes de
+-- gerar qualquer documento (caso real: car_codigo_carga_embarcador=197172,
+-- car_codigo=271589, car_situacao=13/cancelado, contrato 191875 emitido mas
+-- nunca virou CT-e). Antes dessas cargas simplesmente nao apareciam na
+-- conciliacao (nem bloco CT-e/NF, que exige documento, nem OCORRENCIA, que
+-- e so pagamento avulso a motorista) -- bloco novo pra cobrir isso.
+-- Janela de data: ano 2026 (igual ao resto da tabela agora -- a janela
+-- original de 90 dias escondia casos reais, ex.: car_codigo=196008 tem 3
+-- reemissoes, 2 com CT-e cancelado (maio/junho, fora dos 90 dias) e 1 sem
+-- documento -- com filtro de 90 dias so a "sem documento" aparecia, dando
+-- uma visao incompleta da carga pro controle de movimentacoes do usuario).
+carga_sem_documento AS (
+    SELECT cu.car_codigo, cu.car_codigo_carga_embarcador, cu.car_situacao,
+           DATE(cu.date_insert) AS data_criacao
+    FROM prd_bronze.multi_dbo_t_carga cu
+    LEFT JOIN prd_bronze.multi_dbo_t_carga_cte cct ON cct.car_codigo = cu.car_codigo
+    WHERE cct.car_codigo IS NULL
+      AND cu.car_codigo_carga_embarcador IS NOT NULL
+      AND year(cu.date_insert) = 2026
+),
+
+-- ============================================================
+-- 4. DOCUMENTO MULTI -- 1 linha por con_codigo
+--    tipo_documento decide se busca em CONHECIMENTO ou NF_ES
+-- ============================================================
+doc_multi AS (
+    SELECT
+        con_codigo, cte, con_status, tipo_documento, vlr_frete, vlr_receita_bruta AS vlr_receita_bruta_multi, sk_filial,
+        sk_cliente, sk_cooperado, sk_documento, filial AS filial_contabil,
+        car_codigo_carga_embarcador,
+        DATE(data_hora_emissao)     AS data_emissao,
+        split_part(cte, '-', 1)     AS serie_multi,
+        split_part(cte, '-', 2)     AS num_doc_multi,
+        tipo_operacao_anulacao, oco_anulacao, has_true, flag_anulacao, max_con_anulacao,
+        cooperado, vei_placa, inicio_da_prestacao, fim_da_prestacao
+    FROM (
+        SELECT fo.*,
+               -- fato_operacional tem 1 linha por PEDIDO vinculado ao con_codigo,
+               -- nao 1 linha por documento -- uma carga pode ter varios pedidos
+               -- e um deles cancelado (ped_situacao=2). cte/con_status/vlr_frete/
+               -- inicio_da_prestacao/fim_da_prestacao sao sempre iguais entre esses
+               -- pedidos (atributo do documento/viagem), mas sk_filial, car_situacao,
+               -- cooperado e vei_placa podem divergir (~0,35% dos con_codigo, caso de
+               -- troca de veiculo/motorista entre pedidos) -- prefere sempre
+               -- o pedido NAO cancelado no desempate, em vez de escolha arbitraria
+               ROW_NUMBER() OVER (PARTITION BY fo.con_codigo
+                                  ORDER BY (CASE WHEN fo.ped_situacao = 2 THEN 1 ELSE 0 END),
+                                           fo.data_hora_emissao DESC, fo.sk_documento DESC) AS rn
+        FROM prd_gold.fato_operacional fo
+        WHERE fo.con_codigo IS NOT NULL
+          AND fo.tipo_documento IS NOT NULL
+          AND year(fo.data_hora_emissao) = 2026
+    ) t
+    WHERE t.rn = 1
+),
+-- ---------------------------------------------------------------------
+-- FATURAMENTO OPERACIONAL (painel): todo documento fica na conciliacao; estas colunas dizem se
+-- ele esta no painel de faturamento (prd_gold.vw_fato_operacional_painel_filial + filtros de
+-- pagina do painel) e, se nao esta, POR QUE. Nada e removido: receita e custo continuam visiveis.
+--   no painel      = esta na view E nao e anulacao E nao e ND 'REPASSE DE VALOR CIOT' E tipo
+--                    de documento em (COMPL FRETE, CT-e, ND, NFS, NFS-e)
+--   fora da view   = motivo = 1a condicao da view que a linha mais "proxima" de passar nao cumpre
+-- ---------------------------------------------------------------------
+painel_na_view AS (
+    SELECT con_codigo,
+           MAX(operacao_anulacao) AS operacao_anulacao,
+           MAX(tipo_operacao)     AS tipo_operacao_painel,
+           MAX(tipo_documento)    AS tipo_documento_painel
+    FROM prd_gold.vw_fato_operacional_painel_filial
+    WHERE con_codigo IS NOT NULL AND year(data_emissao) = 2026
+    GROUP BY con_codigo
+),
+painel_rank AS (
+    SELECT con_codigo,
+           MAX(CASE WHEN con_status <> 'A'                                         THEN 1
+                    WHEN car_situacao IN (18, 13)                                  THEN 2
+                    WHEN ped_situacao = 2                                          THEN 3
+                    WHEN tipo_operacao_anulacao LIKE '%CIOT CANCELADO%'            THEN 4
+                    WHEN tipo_operacao_anulacao LIKE '%TRANSBORDO%'
+                      OR tipo_operacao_anulacao LIKE '%REUTILIZACAO%'
+                      OR (tipo_operacao_anulacao LIKE '%REPASSE%' AND tipo_documento = 'CT-e') THEN 5
+                    WHEN NOT (oco_anulacao IS NULL OR oco_anulacao = 0)            THEN 6
+                    WHEN mod_abreviacao IS NULL OR mod_abreviacao IN ('DV','OST')
+                      OR tipo_documento IN ('CV','OST','NDA','DV')                 THEN 7
+                    WHEN tipo_operacao_anulacao IS NULL                            THEN 8
+                    ELSE 99 END) AS rk
+    FROM prd_gold.fato_operacional
+    WHERE con_codigo IS NOT NULL AND year(data_hora_emissao) = 2026
+    GROUP BY con_codigo
+),
+painel_motivo AS (
+    SELECT dm.con_codigo,
+        CASE WHEN pv.con_codigo IS NOT NULL THEN
+                  CASE WHEN pv.operacao_anulacao = 'S'                                    THEN 'ANULACAO'
+                       WHEN upper(pv.tipo_operacao_painel) LIKE '%REPASSE DE VALOR CIOT%' THEN 'REPASSE DE VALOR CIOT'
+                       WHEN pv.tipo_documento_painel NOT IN ('COMPL FRETE','CT-e','ND','NFS','NFS-e') THEN 'TIPO DE DOCUMENTO FORA DO PAINEL'
+                       ELSE NULL END
+             ELSE CASE pr.rk WHEN 1 THEN 'STATUS DO DOCUMENTO DIFERENTE DE A'
+                             WHEN 2 THEN 'CARGA CANCELADA'
+                             WHEN 3 THEN 'PEDIDO CANCELADO'
+                             WHEN 4 THEN 'CIOT CANCELADO'
+                             WHEN 5 THEN 'TRANSBORDO / REUTILIZACAO / REPASSE'
+                             WHEN 6 THEN 'OCORRENCIA DE ANULACAO'
+                             WHEN 7 THEN 'TIPO DE DOCUMENTO FORA DO PAINEL'
+                             WHEN 8 THEN 'SEM TIPO DE OPERACAO'
+                             ELSE 'REGRA DE ANULACAO DA VIEW' END
+        END AS motivo_fora_painel
+    FROM doc_multi dm
+    LEFT JOIN painel_na_view pv ON pv.con_codigo = dm.con_codigo
+    LEFT JOIN painel_rank   pr ON pr.con_codigo = dm.con_codigo
+),
+doc_enriquecido AS (
+    SELECT
+        dm.con_codigo, dm.cte, dm.con_status, dm.tipo_documento, dm.vlr_frete, dm.vlr_receita_bruta_multi,
+        pm.motivo_fora_painel,
+        CASE WHEN pm.motivo_fora_painel IS NULL THEN 'SIM' ELSE 'NAO' END AS no_painel,
+        dm.sk_filial AS sk_filial_fo, dm.sk_cliente, dm.sk_cooperado, dm.sk_documento, dm.filial_contabil,
+        dm.car_codigo_carga_embarcador,
+        dm.data_emissao, dm.serie_multi, dm.num_doc_multi,
+        dm.tipo_operacao_anulacao, dm.oco_anulacao, dm.has_true,
+        dm.flag_anulacao, dm.max_con_anulacao,
+        dm.cooperado, dm.vei_placa, dm.inicio_da_prestacao, dm.fim_da_prestacao,
+        ctp.pct_cpf_cnpj            AS cnpj_tomador,
+        ctp.pct_nome                AS nome_tomador,
+        gt.grupo_tomador,
+        CASE WHEN gt.grupo_tomador IS NOT NULL THEN 'SIM' ELSE 'NAO' END AS tem_grupo_pagador,
+        fil.nome_display            AS filial_multi,
+        fm.sk_filial,
+        fm.filial_duplicada,
+        cen.ccv_codigo_integracao   AS filial_integracao,
+        CASE WHEN fl.tem_ativa = 1        THEN 'ATIVA' ELSE 'CANCELADA' END AS situacao_carga,
+        CASE WHEN fl.todos_nao_fiscal = 1 THEN 'NAO'   ELSE 'SIM'       END AS doc_fiscal,
+        -- emissao manual: con_gerado_manualmente (multi_dbo_t_cte) cobre CT-e manual,
+        -- mas veio false nos casos reais de NFS manual confirmados (1-10042, 70000-23) --
+        -- nesses, quem bateu foi ped_possui_nfs_manual (multi_dbo_t_carga_pedido, por
+        -- car_codigo/pedido da carga). Combinamos os dois com OR.
+        CASE WHEN COALESCE(cte_m.con_gerado_manualmente, FALSE)
+               OR COALESCE(nmc.ped_possui_nfs_manual, FALSE)     THEN 'SIM' ELSE 'NAO'
+        END                                                                 AS emissao_manual,
+        CASE WHEN cip.qtd_ciot IS NULL OR cip.qtd_ciot = 0 THEN 'NAO APLICAVEL'
+             WHEN cip.tem_ciot_ativo                      THEN 'VALIDO'
+             ELSE 'CANCELADO'
+        END                                                                 AS ciot,
+        -- vinculo com carga: car_codigo_carga_embarcador vem NULL pra ~1.357
+        -- CT-e/NF de 2026 sem vinculo em multi_dbo_t_carga_cte. cte_m.con_sem_carga
+        -- distingue: 89,9% e documento avulso "sem carga" por design (con_sem_carga=true,
+        -- ex: servico sem frete/carga); o resto (~373 no historico todo, 103 so em
+        -- 2026) e documento ATIVO que deveria ter carga e nao tem -- gap real.
+        CASE WHEN dm.car_codigo_carga_embarcador IS NOT NULL      THEN 'COM CARGA'
+             WHEN COALESCE(cte_m.con_sem_carga, FALSE)            THEN 'SEM CARGA - SERVICO AVULSO'
+             ELSE 'SEM CARGA - GAP'
+        END                                                                 AS vinculo_carga,
+        fl.qtd_cargas, fl.multiplas_cargas, tx.mod_abreviacao, tx.tipodocumento,
+        dc.tpt_codigo AS tipo_cooperado_codigo, dc.tpt_descricao AS tipo_cooperado
+    FROM doc_multi dm
+    LEFT JOIN painel_motivo pm ON pm.con_codigo = dm.con_codigo
+    JOIN prd_bronze.multi_dbo_t_cte cte_m
+        ON cte_m.con_codigo = dm.con_codigo
+    JOIN prd_bronze.multi_dbo_t_cte_participante ctp
+        ON ctp.pct_codigo = cte_m.con_tomador_pagador_cte
+    LEFT JOIN grupo_tomador gt ON gt.grc_cnpj = SUBSTR(ctp.pct_cpf_cnpj, 1, 8)
+    LEFT JOIN filial_multi_map fm ON fm.con_codigo = dm.con_codigo
+    LEFT JOIN prd_gold.dim_filial fil ON fil.sk_filial = fm.sk_filial
+    LEFT JOIN prd_bronze.multi_dbo_t_centro_custo_viagem cen ON cen.ccv_codigo = fil.ccv_codigo
+    LEFT JOIN info_carga_flags fl ON fl.con_codigo = dm.con_codigo
+    LEFT JOIN info_carga_texto tx ON tx.con_codigo = dm.con_codigo
+    LEFT JOIN nfs_manual_por_carga nmc ON nmc.car_codigo_carga_embarcador = dm.car_codigo_carga_embarcador
+    LEFT JOIN ciot_por_documento cip ON cip.con_codigo = dm.con_codigo
+    LEFT JOIN prd_gold.dim_cooperado dc ON dc.sk_cooperado = dm.sk_cooperado
+),
+
+-- ---- Bloco 1: CT-e ----------------------------------------
+cte_multi AS (
+    SELECT * FROM doc_enriquecido WHERE tipo_documento = 'CT-e'
+),
+
+-- ============================================================
+-- 4a. MATCH CT-e x KMM -- P1: exige serie+numero+CNPJ igual
+--    E data de emissao proxima (ate 3 dias). Sem essa checagem,
+--    numeracao de conhecimento reaproveitada anos depois (mesma
+--    serie+numero, mesmo CNPJ) casava por engano com um documento
+--    de outro periodo -- ver caso serie 26 num 1977: existe um
+--    conhecimento de 2025-08-11 com essa chave, e um CT-e do Multi
+--    de 2026-08 com a MESMA chave batia nele por engano (confirmado
+--    via decodificacao da chave de acesso: AAMM=2508 = ago/2025).
+--    P2 (fallback): CNPJ + valor + data quando a chave exata nao bate --
+--    a KMM as vezes renumera o conhecimento na emissao (numero do Multi
+--    diverge do numero no KMM, mesmo documento de verdade -- caso real
+--    investigado: car_codigo_carga_embarcador=219265, CT-e 22-38160/
+--    con_codigo=814863; diagnostico de ~2.745 CT-e "NAO INTEGRADO" com
+--    par plausivel so por CNPJ+valor+data, sem bater a chave). Exige
+--    status alinhado (cancelado bate com cancelado, ativo com ativo),
+--    mesma protecao do P6/P7 do bloco NF -- sem a chave exata pra dar
+--    confianca, status desalinhado e sinal forte de coincidencia de
+--    CNPJ+valor, nao o par de verdade.
+-- ============================================================
+-- P1 primeiro, sozinho (equi-join barato por chave+cnpj)
+cte_kmm_p1_raw AS (
+    SELECT
+        cm.con_codigo,
+        kcf.conhecimento_id,
+        date_diff('day', cm.data_emissao, kcf.data_emissao_kmm) AS match_gap_dias,
+        1 AS match_priority,
+        ROW_NUMBER() OVER (
+            PARTITION BY cm.con_codigo
+            ORDER BY ABS(date_diff('day', cm.data_emissao, kcf.data_emissao_kmm))
+        ) AS rn
+    FROM cte_multi cm
+    JOIN kmm_enriquecido kcf
+        ON cm.cte = kcf.cte_chave
+       AND try_cast(cm.cnpj_tomador AS bigint) = try_cast(kcf.cob_cnpj_cpf AS bigint)
+       AND ABS(date_diff('day', cm.data_emissao, kcf.data_emissao_kmm)) <= 3
+),
+cte_kmm_p1_match AS (
+    SELECT * FROM cte_kmm_p1_raw WHERE rn = 1
+),
+-- P2 SO pros con_codigo que o P1 nao achou -- join por CNPJ sozinho (sem
+-- chave exata) tem fan-out grande em CNPJs com muitos documentos; sem essa
+-- restricao (tentar P1 e P2 juntos num JOIN so, com OR na condicao) o CTAS
+-- ficou mais de 2min sem terminar (rodando contra as ~267 mil linhas do
+-- cte_multi inteiro). Restringindo aqui pros ~29 mil sem match exato, o
+-- fan-out cai proporcionalmente.
+cte_kmm_p2_raw AS (
+    SELECT
+        cm.con_codigo,
+        kcf.conhecimento_id,
+        date_diff('day', cm.data_emissao, kcf.data_emissao_kmm) AS match_gap_dias,
+        2 AS match_priority,
+        ROW_NUMBER() OVER (
+            PARTITION BY cm.con_codigo
+            ORDER BY ABS(date_diff('day', cm.data_emissao, kcf.data_emissao_kmm))
+        ) AS rn
+    FROM (
+        SELECT c.*
+        FROM cte_multi c
+        LEFT JOIN cte_kmm_p1_match p1 ON p1.con_codigo = c.con_codigo
+        WHERE p1.con_codigo IS NULL
+    ) cm
+    JOIN kmm_enriquecido kcf
+        ON try_cast(cm.cnpj_tomador AS bigint) = try_cast(kcf.cob_cnpj_cpf AS bigint)
+       AND ABS(kcf.valor_documento_kmm - cm.vlr_frete) <= 0.01
+       AND ABS(date_diff('day', cm.data_emissao, kcf.data_emissao_kmm)) <= 5
+       AND (cm.con_status IN ('A','S')) = (kcf.cancelado IS NULL)
+       -- sem chave exata pra desempatar, o mesmo conhecimento_id podia ser
+       -- "roubado" por VARIOS con_codigo diferentes com CNPJ+valor parecido
+       -- no mesmo dia (caso real: alguns conhecimento_id reivindicados por
+       -- ate 9 con_codigo diferentes, todos mostrando a MESMA fatura/valor
+       -- por engano) -- exclui conhecimento_id ja usado pelo P1
+       AND kcf.conhecimento_id NOT IN (SELECT conhecimento_id FROM cte_kmm_p1_match)
+),
+-- desempate final: dentre os con_codigo que escolheram o MESMO conhecimento_id
+-- como melhor candidato (rn=1 acima), so o mais proximo (menor gap, desempate
+-- por con_codigo) fica com o match -- os outros ficam sem par (melhor NAO
+-- INTEGRADO do que dividir a mesma fatura entre documentos diferentes)
+cte_kmm_p2_match AS (
+    SELECT con_codigo, conhecimento_id, match_gap_dias, match_priority
+    FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY conhecimento_id
+                                  ORDER BY ABS(match_gap_dias) ASC, con_codigo ASC) AS rn_kmm
+        FROM cte_kmm_p2_raw
+        WHERE rn = 1
+    ) WHERE rn_kmm = 1
+),
+cte_kmm_match AS (
+    SELECT con_codigo, conhecimento_id, match_gap_dias, match_priority FROM cte_kmm_p1_match
+    UNION ALL
+    SELECT con_codigo, conhecimento_id, match_gap_dias, match_priority FROM cte_kmm_p2_match
+),
+
+-- ---- Bloco 2: NF (tudo que nao e CT-e) --------------------
+--  modelos_kmm: array vazio = documento nao fiscal, nao busca no KMM
+--  ND e nao fiscal (igual OST/DV/CV) -- a "serie" que a KMM grava pra
+--  modelo ND e a string literal 'ND', sem relacao com a numeracao do
+--  Multi, entao nunca ha comparacao valida de serie possivel. NDA tambem
+--  e tratada como nao fiscal (decisao do negocio: nao precisa ser analisada;
+--  99,9% nunca existiram em kmm_fiscal_nf_es mesmo)
+nf_multi AS (
+    SELECT de.*,
+        CASE de.tipo_documento
+            WHEN 'NFS'   THEN ARRAY['X1']
+            WHEN 'NFS-e' THEN ARRAY['X1']
+            ELSE CAST(ARRAY[] AS ARRAY(varchar))            -- OST, DV, CV, ND, NDA
+        END AS modelos_kmm,
+        CASE WHEN de.tipo_documento IN ('OST','DV','CV','ND','NDA')
+             THEN 'NAO FISCAL' ELSE 'FISCAL'
+        END AS escopo_kmm
+    FROM doc_enriquecido de
+    WHERE de.tipo_documento <> 'CT-e'
+),
+
+-- ============================================================
+-- 5. MATCH NF -- P1 (mais restrito) ate P7 (fallback fraco)
+-- ============================================================
+nf_candidatos_raw AS (
+    SELECT
+        nm.con_codigo, nm.cte, nm.tipo_documento, nm.cnpj_tomador,
+        nm.vlr_frete, nm.data_emissao, nm.serie_multi, nm.filial_integracao,
+        kn.num_nota_id, kn.serie AS serie_kmm, kn.cod_centro_custo, kn.cod_modelo,
+        kn.cancelada,
+        kn.user_insert AS usuario_doc_kmm,
+        (nm.con_status IN ('A','S')) AS nm_ativo,
+        kn.calc_valor_total_nota AS valor_documento_kmm,
+        kn.calc_valor_icms       AS valor_icms_kmm,
+        kn.serv_iss_valor        AS valor_iss_kmm,
+        date_diff('day', nm.data_emissao, DATE(kn.data_emissao)) AS match_gap_dias,
+        org.cod_unidade_negocio AS unidade_negocio_kmm,
+        CASE
+            -- P1: serie + CNPJ + filial + data + valor
+            WHEN CAST(kn.serie AS varchar) = nm.serie_multi
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND CAST(org.cod_unidade_negocio AS varchar) = nm.filial_integracao
+             AND DATE(kn.data_emissao) = nm.data_emissao
+             AND kn.calc_valor_total_nota = nm.vlr_frete   THEN 1
+            -- P2: serie + CNPJ + data + valor
+            WHEN CAST(kn.serie AS varchar) = nm.serie_multi
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND DATE(kn.data_emissao) = nm.data_emissao
+             AND kn.calc_valor_total_nota = nm.vlr_frete   THEN 2
+            -- P3: serie + CNPJ + data
+            WHEN CAST(kn.serie AS varchar) = nm.serie_multi
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND DATE(kn.data_emissao) = nm.data_emissao   THEN 3
+            -- P4: serie + CNPJ + valor
+            WHEN CAST(kn.serie AS varchar) = nm.serie_multi
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND kn.calc_valor_total_nota = nm.vlr_frete   THEN 4
+            -- P5: serie + CNPJ
+            WHEN CAST(kn.serie AS varchar) = nm.serie_multi
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+                                                          THEN 5
+            -- P6: CNPJ + valor + data (sem serie) -- SO documento ativo: um doc
+            -- cancelado/reemitido nao pode "roubar" via serie errada o match de
+            -- um KMM que na verdade pertence a outra serie/documento (ver caso
+            -- car_codigo_carga_embarcador = 196772, doc 676: Multi reemitiu em
+            -- serie 100 (cancelada) e 101 (ativa), KMM so tem serie 101 -- sem
+            -- esse filtro a serie 100 cancelada roubava o match por CNPJ+valor)
+            WHEN nm.con_status IN ('A','S')
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND kn.calc_valor_total_nota = nm.vlr_frete
+             AND DATE(kn.data_emissao) = nm.data_emissao   THEN 6
+            -- P7: CNPJ + valor -- mesma restricao do P6
+            WHEN nm.con_status IN ('A','S')
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND kn.calc_valor_total_nota = nm.vlr_frete   THEN 7
+            -- P8: fallback sem serie e sem igualdade exata de valor -- numero + modelo
+            -- (ja no JOIN) + CNPJ + data ate 3 dias + valor ate R$ 0,05 de diferenca.
+            -- Cobre reemissao em que o KMM grava outra serie e/ou centavos de arredondamento
+            -- (caso real: carga 225870, NFS 1-10042 -- Multi serie 1 R$ 703,65 vs KMM serie A1
+            -- R$ 703,66). match_confianca = 'BAIXA' pra aparecer no BI.
+            -- Documento CANCELADO no Multi so casa por P8 com nota CANCELADA no KMM: sem isso o
+            -- cancelado "roubava" a nota ATIVA da reemissao (mesmo numero/valor) e virava
+            -- 'DIVERGENCIA - CANCELADO MULTI / VALIDO KMM' falsa (38 casos, ex.: NF 100-432).
+            WHEN (nm.con_status IN ('A','S') OR kn.cancelada = 1)
+             AND try_cast(kn.dest_cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+             AND ABS(date_diff('day', nm.data_emissao, DATE(kn.data_emissao))) <= 3
+             AND ABS(kn.calc_valor_total_nota - nm.vlr_frete) <= 0.05 THEN 8
+        END AS match_priority
+    FROM nf_multi nm
+    JOIN prd_bronze.kmm_fiscal_nf_es kn
+        -- num_nota_fiscal e decimal(38,18): passa por bigint pra nao virar '361.000000000000000000'
+        ON try_cast(try_cast(kn.num_nota_fiscal AS bigint) AS varchar) = nm.num_doc_multi
+       -- nota cancelada no KMM tambem entra como candidata (antes era descartada e todo
+       -- documento cancelado no Multi virava 'CANCELADO SEM KMM'); o status dos dois lados
+       -- e comparado la no resultado (DIVERGENCIA se um esta ativo e o outro cancelado)
+       AND contains(nm.modelos_kmm, kn.cod_modelo)
+    LEFT JOIN prd_bronze.kmm_kss_organograma org ON kn.cod_centro_custo = org.cod_centro_custo
+),
+nf_kmm_match AS (
+    SELECT * FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY con_codigo
+                                  -- 1o: candidato com o MESMO status do Multi (ativo=ativo,
+                                  -- cancelado=cancelado) -- numero reaproveitado em reemissao
+                                  -- (ex: 1-10042) nao pode casar ativo com a nota cancelada
+                                  ORDER BY (CASE WHEN (nm_ativo = (cancelada = 0)) THEN 0 ELSE 1 END),
+                                           match_priority ASC, num_nota_id ASC) AS rn
+        FROM nf_candidatos_raw
+        WHERE match_priority IS NOT NULL
+    ) WHERE rn = 1
+),
+
+-- ============================================================
+-- 4b. FALLBACK CONTAS A RECEBER pra documento sem match fiscal no KMM
+--    (NAO INTEGRADO -- kcf/nkm nao achou conhecimento/nf_es). Sem o
+--    documento fiscal, o caminho normal (kmm_fiscal_conhecimento_receber /
+--    kmm_fiscal_nf_es_receber -> contas_receber) nao existe --
+--    kmm_finan_finan_contas_receber nao tem NENHUM campo que ligue direto
+--    a carga/contrato, so cod_pessoa (pagador) -- confirmado 98,8% desses
+--    CT-e/NF tem contrato e titulo a pagar reais (custo processado
+--    normalmente), so o documento fiscal que nao sincronizou. Busca por
+--    CNPJ (via kmm_kss_pessoa) + valor + data, com o MESMO desempate
+--    collision-safe do fallback do bloco 4a: sem ele, 27% dos titulos
+--    candidatos eram disputados por mais de um documento diferente.
+-- ============================================================
+receber_fallback_cte_raw AS (
+    SELECT
+        cm.con_codigo,
+        kr.contas_receber_id,
+        kr.num_docto,
+        kr.valor_docto,
+        DATE(kr.data_emissao) AS data_emissao_estimada,
+        date_diff('day', cm.data_emissao, DATE(kr.data_emissao)) AS gap_dias,
+        ROW_NUMBER() OVER (PARTITION BY cm.con_codigo
+                           ORDER BY ABS(date_diff('day', cm.data_emissao, DATE(kr.data_emissao)))) AS rn
+    FROM (
+        SELECT c.*
+        FROM cte_multi c
+        LEFT JOIN cte_kmm_match ckm ON ckm.con_codigo = c.con_codigo
+        WHERE ckm.con_codigo IS NULL AND c.con_status IN ('A','S')
+    ) cm
+    JOIN prd_bronze.kmm_kss_pessoa pc ON try_cast(pc.cnpj_cpf AS bigint) = try_cast(cm.cnpj_tomador AS bigint)
+    JOIN prd_bronze.kmm_finan_finan_contas_receber kr
+        ON kr.cod_pessoa = pc.cod_pessoa
+       AND ABS(kr.valor_docto - cm.vlr_frete) <= 0.01
+       AND ABS(date_diff('day', cm.data_emissao, DATE(kr.data_emissao))) <= 5
+       AND kr.cancelado = 0
+       AND kr.data_estorno IS NULL
+),
+receber_fallback_cte_match AS (
+    SELECT con_codigo, contas_receber_id, num_docto, valor_docto, data_emissao_estimada, gap_dias
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY contas_receber_id
+                                     ORDER BY ABS(gap_dias) ASC, con_codigo ASC) AS rn_kr
+        FROM receber_fallback_cte_raw
+        WHERE rn = 1
+    ) WHERE rn_kr = 1
+),
+receber_fallback_nf_raw AS (
+    SELECT
+        nm.con_codigo,
+        kr.contas_receber_id,
+        kr.num_docto,
+        kr.valor_docto,
+        DATE(kr.data_emissao) AS data_emissao_estimada,
+        date_diff('day', nm.data_emissao, DATE(kr.data_emissao)) AS gap_dias,
+        ROW_NUMBER() OVER (PARTITION BY nm.con_codigo
+                           ORDER BY ABS(date_diff('day', nm.data_emissao, DATE(kr.data_emissao)))) AS rn
+    FROM (
+        SELECT n.*
+        FROM nf_multi n
+        LEFT JOIN nf_kmm_match nkm ON nkm.con_codigo = n.con_codigo
+        WHERE nkm.con_codigo IS NULL AND n.con_status IN ('A','S') AND n.escopo_kmm = 'FISCAL'
+    ) nm
+    JOIN prd_bronze.kmm_kss_pessoa pc ON try_cast(pc.cnpj_cpf AS bigint) = try_cast(nm.cnpj_tomador AS bigint)
+    JOIN prd_bronze.kmm_finan_finan_contas_receber kr
+        ON kr.cod_pessoa = pc.cod_pessoa
+       AND ABS(kr.valor_docto - nm.vlr_frete) <= 0.01
+       AND ABS(date_diff('day', nm.data_emissao, DATE(kr.data_emissao))) <= 5
+       AND kr.cancelado = 0
+       AND kr.data_estorno IS NULL
+),
+receber_fallback_nf_match AS (
+    SELECT con_codigo, contas_receber_id, num_docto, valor_docto, data_emissao_estimada, gap_dias
+    FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY contas_receber_id
+                                     ORDER BY ABS(gap_dias) ASC, con_codigo ASC) AS rn_kr
+        FROM receber_fallback_nf_raw
+        WHERE rn = 1
+    ) WHERE rn_kr = 1
+),
+
+-- ============================================================
+-- 6a. BAIXAS DO CONTAS A RECEBER -- pagamento (amortizacao), juro
+--     e desconto, agregados por titulo. Usado pra classificar
+--     QUITADO / PAGAMENTO PARCIAL / EM ABERTO.
+-- ============================================================
+receber_pago AS (
+    SELECT contas_receber_id,
+        SUM(valor_amortizacao)          AS valor_pago,
+        MAX(DATE(data_amortizacao))     AS data_ultima_amortizacao
+    FROM prd_bronze.kmm_finan_finan_contas_receber_amort
+    WHERE (amort_cancelado = 0 OR amort_cancelado IS NULL) AND data_estorno IS NULL
+    GROUP BY contas_receber_id
+),
+receber_juro AS (
+    SELECT contas_receber_id, SUM(valor_juro) AS valor_juro
+    FROM prd_bronze.kmm_finan_finan_contas_receber_juro
+    WHERE (estorno_juro = 0 OR estorno_juro IS NULL) AND data_estorno IS NULL
+    GROUP BY contas_receber_id
+),
+receber_desconto AS (
+    SELECT contas_receber_id, SUM(valor_desconto) AS valor_desconto
+    FROM prd_bronze.kmm_finan_finan_contas_receber_desc
+    WHERE data_estorno IS NULL
+    GROUP BY contas_receber_id
+),
+
+-- ============================================================
+-- 6. FATURA (contas a receber) -- pre-agregada: 1 nota pode
+--    ter N parcelas em M faturas distintas
+-- ============================================================
+fatura_cte AS (
+    SELECT
+        kcr.conhecimento_id,
+        COUNT(DISTINCT kr.contas_receber_id)               AS qtd_parcelas,
+        COUNT(DISTINCT kr.num_docto)                       AS qtd_faturas,
+        array_join(array_agg(DISTINCT kr.num_docto), ', ') AS num_fatura,
+        array_join(array_agg(DISTINCT kr.docto_id), ', ')  AS tipo_docto_fatura,
+        SUM(kr.valor_docto)                                AS valor_fatura,
+        MIN(DATE(kr.data_vencto))                          AS venc_primeiro,
+        MAX(DATE(kr.data_vencto))                          AS venc_ultimo,
+        MIN(DATE(kr.data_emissao))                         AS data_emissao_fatura,
+        array_join(array_agg(DISTINCT kr.user_insert), ', ') AS usuario_fatura,
+        SUM(COALESCE(rp.valor_pago,0))                     AS valor_pago_receber,
+        SUM(COALESCE(rj.valor_juro,0))                     AS valor_juro_receber,
+        SUM(COALESCE(rd.valor_desconto,0))                 AS valor_desconto_receber,
+        -- data de referencia do recebimento: ultima amortizacao de cada parcela,
+        -- ou o vencimento da parcela se ela ainda nao foi paga; pega a mais tardia
+        -- (a carga so "fecha o ciclo" quando a ULTIMA parcela e resolvida)
+        MAX(COALESCE(rp.data_ultima_amortizacao, DATE(kr.data_vencto))) AS data_ref_receber,
+        MAX(CASE WHEN rp.data_ultima_amortizacao IS NULL THEN 1 ELSE 0 END) AS receber_tem_parcela_estimada
+    FROM (
+        SELECT DISTINCT conhecimento_id, contas_receber_id
+        FROM prd_bronze.kmm_fiscal_conhecimento_receber
+        WHERE data_cancelamento IS NULL
+    ) kcr
+    JOIN prd_bronze.kmm_finan_finan_contas_receber kr
+        ON kr.contas_receber_id = kcr.contas_receber_id
+       AND kr.data_estorno IS NULL
+       AND kr.cancelado = 0
+    LEFT JOIN receber_pago rp     ON rp.contas_receber_id = kr.contas_receber_id
+    LEFT JOIN receber_juro rj     ON rj.contas_receber_id = kr.contas_receber_id
+    LEFT JOIN receber_desconto rd ON rd.contas_receber_id = kr.contas_receber_id
+    GROUP BY kcr.conhecimento_id
+),
+fatura_nf AS (
+    SELECT
+        r.num_nota_id,
+        COUNT(DISTINCT kr.contas_receber_id)               AS qtd_parcelas,
+        COUNT(DISTINCT kr.num_docto)                       AS qtd_faturas,
+        array_join(array_agg(DISTINCT kr.num_docto), ', ') AS num_fatura,
+        array_join(array_agg(DISTINCT kr.docto_id), ', ')  AS tipo_docto_fatura,
+        SUM(kr.valor_docto)                                AS valor_fatura,
+        MIN(DATE(kr.data_vencto))                          AS venc_primeiro,
+        MAX(DATE(kr.data_vencto))                          AS venc_ultimo,
+        MIN(DATE(kr.data_emissao))                         AS data_emissao_fatura,
+        array_join(array_agg(DISTINCT kr.user_insert), ', ') AS usuario_fatura,
+        SUM(COALESCE(rp.valor_pago,0))                     AS valor_pago_receber,
+        SUM(COALESCE(rj.valor_juro,0))                     AS valor_juro_receber,
+        SUM(COALESCE(rd.valor_desconto,0))                 AS valor_desconto_receber,
+        MAX(COALESCE(rp.data_ultima_amortizacao, DATE(kr.data_vencto))) AS data_ref_receber,
+        MAX(CASE WHEN rp.data_ultima_amortizacao IS NULL THEN 1 ELSE 0 END) AS receber_tem_parcela_estimada
+    FROM (
+        SELECT DISTINCT num_nota_id, contas_receber_id
+        FROM prd_bronze.kmm_fiscal_nf_es_receber
+    ) r
+    JOIN prd_bronze.kmm_finan_finan_contas_receber kr
+        ON kr.contas_receber_id = r.contas_receber_id
+       AND kr.data_estorno IS NULL
+       AND kr.cancelado = 0
+    LEFT JOIN receber_pago rp     ON rp.contas_receber_id = kr.contas_receber_id
+    LEFT JOIN receber_juro rj     ON rj.contas_receber_id = kr.contas_receber_id
+    LEFT JOIN receber_desconto rd ON rd.contas_receber_id = kr.contas_receber_id
+    GROUP BY r.num_nota_id
+),
+-- fatura_cte/fatura_nf ja filtram kr.cancelado=0 AND kr.data_estorno IS NULL
+-- (correto pro valor_fatura, nao soma titulo cancelado/estornado) -- mas isso
+-- esconde por completo que existiu uma fatura cancelada pro documento. Essas
+-- duas CTEs so verificam existencia (sem somar valor) pra virar o flag
+-- fatura_cancelada_kmm -- checam cancelado=1 OU data_estorno preenchido
+-- (mesmo par de sinais do lado pagar, ver titulo_pagar_estornado: um titulo
+-- pode ser revertido via data_estorno sem o flag cancelado ir pra 1)
+fatura_cancelada_cte AS (
+    SELECT DISTINCT kcr.conhecimento_id
+    FROM prd_bronze.kmm_fiscal_conhecimento_receber kcr
+    JOIN prd_bronze.kmm_finan_finan_contas_receber kr ON kr.contas_receber_id = kcr.contas_receber_id
+    WHERE kr.cancelado = 1 OR kr.data_estorno IS NOT NULL
+),
+fatura_cancelada_nf AS (
+    SELECT DISTINCT r.num_nota_id
+    FROM prd_bronze.kmm_fiscal_nf_es_receber r
+    JOIN prd_bronze.kmm_finan_finan_contas_receber kr ON kr.contas_receber_id = r.contas_receber_id
+    WHERE kr.cancelado = 1 OR kr.data_estorno IS NOT NULL
+),
+
+-- ============================================================
+-- 7. BLOCO OCORRENCIA -- contrato avulso / pagamento motorista (lado Multi)
+--    Nao tem con_codigo (nao e um documento fiscal); vincula-se pela
+--    carga (car_codigo) e pelo par (pam_numero + pessoa) no lado KMM.
+-- ============================================================
+avulso_multi AS (
+    SELECT
+        pm.pam_codigo, pm.pam_numero, pm.pam_valor, pm.pam_data_pagamento,
+        pm.car_codigo,
+        -- cli_cgccpf_terceiro as vezes e um codigo interno do Multi de 15 digitos
+        -- (1 + zeros + id, ex: 100000000004315) pra cadastro sem documento na chave --
+        -- 230 pagamentos / 82 transportadores em 2026, todos caiam em 'PESSOA SEM CADASTRO
+        -- KMM'. O documento real fica em multi_dbo_t_cliente.cli_cnpjcpf (e existe no KMM).
+        COALESCE(try_cast(NULLIF(trim(cli.cli_cnpjcpf), '') AS bigint),
+                 try_cast(cu.cli_cgccpf_terceiro AS bigint)) AS cnpj_transportador,
+        cu.car_codigo_carga_embarcador,
+        cu.car_situacao
+    FROM prd_bronze.multi_dbo_t_pagamento_motorista_tms pm
+    JOIN prd_bronze.multi_dbo_t_carga cu ON cu.car_codigo = pm.car_codigo
+    LEFT JOIN prd_bronze.multi_dbo_t_cliente cli ON cli.cli_cgccpf = cu.cli_cgccpf_terceiro
+    WHERE pm.pam_situacao IN (2, 10)
+      AND year(pm.pam_data_pagamento) = 2026
+),
+-- custo de ocorrencia (pagamento avulso ao motorista) agregado por carga --
+-- refletido no CT-e/NF daquela carga como custo adicional (ver custo_ocorrencia
+-- no bloco CONCILIACAO COMPLETA: margem_bruta = valor_fatura - valor_titulo_pagar
+-- - custo_ocorrencia, formula confirmada contra dados reais da hml_gold)
+custo_ocorrencia_por_carga AS (
+    SELECT car_codigo_carga_embarcador, SUM(pam_valor) AS custo_ocorrencia
+    FROM avulso_multi
+    GROUP BY car_codigo_carga_embarcador
+),
+-- LEFT JOIN de proposito: se a pessoa nao existir na KMM, o registro
+-- continua aparecendo (e cai em 'NAO INTEGRADO - PESSOA SEM CADASTRO KMM')
+avulso_enriquecido AS (
+    SELECT DISTINCT
+        av.*,
+        pc.cod_pessoa    AS cod_pessoa_kmm,
+        pc.razao_social  AS cooperado
+    FROM avulso_multi av
+    LEFT JOIN prd_bronze.kmm_kss_pessoa pc ON av.cnpj_transportador = try_cast(pc.cnpj_cpf AS bigint)
+),
+
+-- ============================================================
+-- 8. LADO KMM -- contrato avulso (serie_formulario = 'P')
+-- ============================================================
+avulso_kmm_raw AS (
+    SELECT
+        av.pam_codigo, z.lancto_id, z.num_formulario, z.data_cancelamento, z.proprietario_cod_pessoa,
+        z.user_insert          AS usuario_doc_kmm,
+        z.valor_frete_bruto    AS valor_contrato_bruto,
+        z.valor_frete_liquido  AS valor_contrato_liquido,
+        ROW_NUMBER() OVER (
+            PARTITION BY av.pam_codigo
+            ORDER BY (CASE WHEN z.data_cancelamento IS NULL THEN 0 ELSE 1 END), z.lancto_id DESC
+        ) AS rn
+    FROM avulso_enriquecido av
+    JOIN prd_bronze.kmm_contrato_contrato_transp z
+        ON z.num_formulario = av.pam_numero
+       AND z.serie_formulario = 'P'
+       AND z.proprietario_cod_pessoa = av.cod_pessoa_kmm
+),
+avulso_kmm_match AS (
+    SELECT * FROM avulso_kmm_raw WHERE rn = 1
+),
+-- dedup generico de kmm_contrato_contrato_transp_pagar por lancto_id
+-- (reaproveitado pelo bloco OCORRENCIA e pelo bloco 9 -- fatura de custo)
+titulo_pagar_por_lancto AS (
+    SELECT * FROM (
+        SELECT dcp.*,
+               ROW_NUMBER() OVER (PARTITION BY dcp.lancto_id ORDER BY dcp.adiantamento_saldo DESC) AS rn
+        FROM prd_bronze.kmm_contrato_contrato_transp_pagar dcp
+    ) WHERE rn = 1
+),
+
+-- ============================================================
+-- 8a. BAIXAS DO CONTAS A PAGAR -- pagamento (amortizacao), juro
+--     e desconto, agregados por titulo. Mesma logica do lado
+--     receber, usado pra classificar QUITADO/PARCIAL/EM ABERTO
+--     do titulo pago ao transportador.
+-- ============================================================
+pagar_pago AS (
+    SELECT contas_pagar_id,
+        SUM(valor_amortizacao)      AS valor_pago,
+        MAX(DATE(data_amortizacao)) AS data_ultima_amortizacao
+    FROM prd_bronze.kmm_finan_finan_contas_pagar_amort
+    WHERE data_estorno IS NULL
+    GROUP BY contas_pagar_id
+),
+pagar_juro AS (
+    SELECT contas_pagar_id, SUM(valor_juro) AS valor_juro
+    FROM prd_bronze.kmm_finan_finan_contas_pagar_juro
+    WHERE data_estorno IS NULL
+    GROUP BY contas_pagar_id
+),
+pagar_desconto AS (
+    SELECT contas_pagar_id, SUM(valor_desconto) AS valor_desconto
+    FROM prd_bronze.kmm_finan_finan_contas_pagar_desc
+    WHERE data_estorno IS NULL
+    GROUP BY contas_pagar_id
+),
+
+-- kmm_finan_finan_contas_pagar nao tem campo "cancelado" (diferente do
+-- contas_receber) -- o sinal de estorno/cancelamento do titulo a pagar e
+-- data_estorno IS NOT NULL (3.999 titulos em 2026). Existencia (por
+-- num_formulario/contrato) pra virar o flag fatura_pagar_cancelada_kmm,
+-- mesmo padrao 3-estados do lado receber.
+titulo_pagar_estornado AS (
+    SELECT DISTINCT z.num_formulario
+    FROM prd_bronze.kmm_contrato_contrato_transp z
+    JOIN prd_bronze.kmm_contrato_contrato_transp_pagar dcp ON dcp.lancto_id = z.lancto_id
+    JOIN prd_bronze.kmm_finan_finan_contas_pagar cp ON cp.contas_pagar_id = dcp.contas_pagar_id
+    WHERE cp.data_estorno IS NOT NULL
+),
+
+-- titulos a pagar AGREGADOS por contrato (lancto_id). Um contrato pode ter varios
+-- titulos (adiantamento + saldo: ex. contrato 199628 = 2 x R$ 600 = R$ 1.200, num_docto
+-- igual nos dois). titulo_pagar_por_lancto escolhia SO UM deles (rn=1) e o custo saia
+-- pela metade. Aqui soma todos (distintos por contas_pagar_id); titulo estornado so conta
+-- se nao houver nenhum ativo no contrato (mantem o flag ESTORNADO como antes).
+pagar_agregado AS (
+    SELECT t.lancto_id,
+        MAX(cp.contas_pagar_id)                                     AS contas_pagar_id,
+        array_join(array_agg(DISTINCT CAST(cp.num_docto AS varchar)), ', ') AS num_docto,
+        MAX_BY(cp.user_insert, cp.contas_pagar_id)                  AS user_insert,
+        COALESCE(SUM(cp.valor_docto) FILTER (WHERE cp.data_estorno IS NULL), SUM(cp.valor_docto)) AS valor_docto,
+        COALESCE(SUM(pp.valor_pago) FILTER (WHERE cp.data_estorno IS NULL), SUM(pp.valor_pago))   AS valor_pago,
+        COALESCE(SUM(pj.valor_juro) FILTER (WHERE cp.data_estorno IS NULL), SUM(pj.valor_juro))   AS valor_juro,
+        COALESCE(SUM(pd.valor_desconto) FILTER (WHERE cp.data_estorno IS NULL), SUM(pd.valor_desconto)) AS valor_desconto,
+        -- a carga so "fecha o ciclo" quando o ULTIMO titulo e resolvido (mesma ideia do lado receber)
+        MAX(COALESCE(pp.data_ultima_amortizacao, DATE(cp.data_vencto))) AS data_ref,
+        MAX(CASE WHEN pp.data_ultima_amortizacao IS NULL THEN 1 ELSE 0 END) AS tem_estimado,
+        CASE WHEN COUNT_IF(cp.data_estorno IS NULL) > 0 THEN NULL ELSE MAX(cp.data_estorno) END AS data_estorno
+    FROM (SELECT DISTINCT lancto_id, contas_pagar_id
+          FROM prd_bronze.kmm_contrato_contrato_transp_pagar) t
+    JOIN prd_bronze.kmm_finan_finan_contas_pagar cp ON cp.contas_pagar_id = t.contas_pagar_id
+    LEFT JOIN pagar_pago pp     ON pp.contas_pagar_id = cp.contas_pagar_id
+    LEFT JOIN pagar_juro pj     ON pj.contas_pagar_id = cp.contas_pagar_id
+    LEFT JOIN pagar_desconto pd ON pd.contas_pagar_id = cp.contas_pagar_id
+    GROUP BY t.lancto_id
+),
+
+-- ============================================================
+-- REGRA (2026-10-06): contrato/titulo/custo so aparecem em documento VALIDO (con_status A/S) de carga ATIVA.
+--   Documento cancelado de carga ativa NAO herda contrato/titulo/pagamento (o contrato e dos docs validos);
+--   antes herdava e mostrava o custo da carga num doc cancelado (ex.: carga 228292, CT-e 30-24153).
+-- 9. FATURA DE CUSTO (contas a pagar) -- contrato de frete terceiro
+--    Vale para CT-e e NF: 1 titulo a pagar por car_codigo_carga_embarcador
+--    (a carga pode ter varios documentos, mas o contrato de frete
+--     terceiro e da carga, entao o titulo a pagar e compartilhado)
+-- ============================================================
+cft_pagar_raw AS (
+    SELECT
+        cu.car_codigo,
+        cu.car_codigo_carga_embarcador,
+        cft.cft_numero_contrato AS contrato,
+        cp.num_docto AS num_titulo_pagar,
+        cp.contas_pagar_id,
+        cp.valor_docto AS valor_titulo_pagar,
+        cp.user_insert AS usuario_titulo_pagar,
+        cp.valor_pago     AS valor_pago_pagar,
+        cp.valor_juro     AS valor_juro_pagar,
+        cp.valor_desconto AS valor_desconto_pagar,
+        -- data de referencia do pagamento: ultima amortizacao do titulo,
+        -- ou o vencimento se ainda nao foi pago
+        cp.data_ref AS data_ref_pagar,
+        cp.tem_estimado AS pagar_tem_estimado,
+        z.valor_frete_bruto    AS valor_contrato_bruto,
+        z.valor_frete_liquido  AS valor_contrato_liquido,
+        z.lancto_id  AS pagar_lancto_id,
+        z.data_cancelamento AS contrato_data_cancelamento_kmm,
+        z.serie_formulario AS operador_contrato,
+        (tpe.num_formulario IS NOT NULL) AS teve_titulo_pagar_estornado,
+        -- se o cp escolhido (rn=1) e ele mesmo o estornado (unico titulo
+        -- disponivel pra essa carga, sem substituto ativo), num_titulo_pagar
+        -- nao pode contar como "reemitida" -- precisa saber se ESSE cp
+        -- especifico esta estornado, nao so se existiu estorno em algum lugar
+        cp.data_estorno AS titulo_pagar_data_estorno,
+        ROW_NUMBER() OVER (
+            PARTITION BY cu.car_codigo_carga_embarcador
+            ORDER BY (CASE WHEN cp.contas_pagar_id IS NULL THEN 1 ELSE 0 END),
+                      (CASE WHEN z.lancto_id IS NULL THEN 1 ELSE 0 END),
+                      -- entre candidatos com z vinculado, prefere o NAO cancelado
+                      -- no KMM (evita que um contrato cancelado "roube" o rn=1 de
+                      -- um ativo na mesma carga/embarcador)
+                      (CASE WHEN z.data_cancelamento IS NOT NULL THEN 1 ELSE 0 END),
+                      -- e entre titulos, prefere o NAO estornado
+                      (CASE WHEN cp.data_estorno IS NOT NULL THEN 1 ELSE 0 END),
+                      cp.contas_pagar_id DESC
+        ) AS rn
+    FROM prd_bronze.multi_dbo_t_carga cu
+    JOIN prd_bronze.multi_dbo_t_contrato_frete_terceiro cft
+        ON cft.car_codigo = cu.car_codigo
+       AND cft.cft_contrato_frete <> 3
+       -- tipo 5 (EFRETEC) foi incluido: 98,9% desses contratos sao de
+       -- carga cancelada (car_situacao 13/18, sem custo mesmo), mas ~64
+       -- contratos/2026 estao em carga ATIVA com R$441mil em
+       -- cft_valor_frete_sub_contratacao e so 1 tem titulo no KMM --
+       -- incluir aqui garante que ao menos o numero do contrato apareca
+       -- (valor_titulo_pagar fica NULL quando nao ha titulo real, sem
+       -- inventar custo)
+    LEFT JOIN prd_bronze.kmm_contrato_contrato_transp z
+        ON z.num_formulario = cft.cft_numero_contrato
+       AND z.serie_formulario IN ('U','REPOMFRETE','EFRETE','RI','RIC','EXTRATTA',
+                                   'UC','REPOMFRETEC','EFRETEC','RIC','EXTRATTAC',
+                                   'UCC','REPOMFRETECC','EFRETECC','UCCC','UCCCC','EXTRATTACC')
+       -- antes excluia z.data_cancelamento IS NULL aqui, escondendo contratos
+       -- cancelados no KMM por completo. Agora deixa entrar (com o tiebreaker
+       -- acima preferindo o nao-cancelado) e expoe contrato_data_cancelamento_kmm
+       -- pra virar o flag contrato_cancelado_kmm no resultado final
+    LEFT JOIN pagar_agregado cp ON cp.lancto_id = z.lancto_id
+    LEFT JOIN titulo_pagar_estornado tpe ON tpe.num_formulario = z.num_formulario
+),
+cft_pagar AS (
+    SELECT * FROM cft_pagar_raw WHERE rn = 1
+),
+-- MESMO cft_pagar_raw, mas deduplicado por car_codigo (nao por
+-- car_codigo_carga_embarcador) -- usado so no bloco SEM DOCUMENTO. Sem isso,
+-- o contrato do car_codigo ATIVO da carga (que tem titulo/lancto_id de
+-- verdade) "vaza" pra linha do car_codigo cancelado sem documento -- caso
+-- real: car_codigo_carga_embarcador=197172, car_codigo=271589 (cancelado,
+-- contrato 191875, tipo=5, excluido pelo filtro) aparecia com o contrato
+-- 200642 do car_codigo=302739 (ativo, irmao) por engano.
+cft_pagar_por_car_codigo AS (
+    SELECT * FROM (
+        SELECT cfr.*,
+               ROW_NUMBER() OVER (
+                     PARTITION BY cfr.car_codigo
+                     ORDER BY (CASE WHEN cfr.contas_pagar_id IS NULL THEN 1 ELSE 0 END),
+                              (CASE WHEN cfr.pagar_lancto_id IS NULL THEN 1 ELSE 0 END),
+                              cfr.contas_pagar_id DESC
+               ) AS rn2
+        FROM cft_pagar_raw cfr
+    ) WHERE rn2 = 1
+),
+-- custo_ocorrencia por car_codigo especifico (mesmo motivo do contrato acima)
+custo_ocorrencia_por_car_codigo AS (
+    SELECT car_codigo, SUM(pam_valor) AS custo_ocorrencia
+    FROM avulso_multi
+    GROUP BY car_codigo
+),
+
+-- ============================================================
+-- CONCILIACAO COMPLETA (CT-e + NF + OCORRENCIA)
+-- ============================================================
+conciliacao AS (
+
+-- ------------------------------------------------------------
+-- SELECT FINAL -- BLOCO CT-e
+-- ------------------------------------------------------------
+SELECT
+    'CT-e'                                                     AS tipo_analise,
+    year(cm.data_emissao)                                      AS ano_emissao,
+    cm.tipo_documento,
+    cm.cte, cm.con_codigo, cm.con_status,
+    cm.car_codigo_carga_embarcador,
+    cm.sk_filial, cm.sk_cliente, cm.sk_cooperado, cm.sk_documento,
+    CASE cm.con_status
+        WHEN 'A' THEN 'Autorizado'  WHEN 'S' THEN 'Substituido'
+        WHEN 'C' THEN 'Cancelado'   WHEN 'I' THEN 'Inutilizado'
+        WHEN 'R' THEN 'Rejeitado'   WHEN 'Z' THEN 'Denegado'
+        ELSE cm.con_status
+    END                                                        AS status_multi_descricao,
+    cm.data_emissao,
+    cm.cnpj_tomador, cm.nome_tomador, cm.grupo_tomador, cm.tem_grupo_pagador, cm.filial_multi, cm.filial_duplicada,
+    cm.cooperado, cm.vei_placa, cm.inicio_da_prestacao, cm.fim_da_prestacao,
+    cm.situacao_carga, cm.doc_fiscal, cm.emissao_manual, cm.qtd_cargas, cm.multiplas_cargas,
+    cm.mod_abreviacao, cm.tipodocumento,
+    cm.ciot,
+    cm.vinculo_carga,
+    CASE WHEN cm.tipo_operacao_anulacao LIKE '%TRANSBORDO%'     THEN 'SIM'       ELSE 'NAO'    END AS transbordo,
+    CASE WHEN cm.oco_anulacao IS NOT NULL
+          OR ((cm.has_true = 0) AND (cm.flag_anulacao = FALSE) AND (cm.con_codigo = cm.max_con_anulacao))
+          OR ((cm.has_true = 1) AND (cm.flag_anulacao = TRUE OR cm.flag_anulacao IS NOT NULL))
+         THEN 'SIM' ELSE 'NAO' END                             AS anulacao,
+    -- lado KMM
+    kcf.conhecimento_id                                        AS kmm_doc_id,
+    kcf.filial_kmm,
+    cm.filial_contabil,
+    CAST(kcf.unidade_negocio AS varchar)                       AS unidade_negocio_kmm,
+    kcf.origem_mapeamento,
+    CASE WHEN kcf.conhecimento_id IS NULL THEN NULL
+         WHEN kcf.cancelado IS NULL THEN 'Ativo' ELSE 'Cancelado'
+    END                                                        AS status_kmm_descricao,
+    CAST(NULL AS varchar)                                      AS match_priority_nf,
+    -- aderencia do match CT-e x KMM: quanto o dia de emissao diverge entre
+    -- os dois sistemas. gap=0 e o caso comum (~91,5% dos casos); gap 1-3 via
+    -- chave exata (P1) ainda entra no match (ver bloco 4a); P2 (fallback por
+    -- CNPJ+valor, chave divergente) tolera ate 5 dias -- match_gap_dias pode
+    -- chegar a 5 nesse caso, sinalizado por match_confianca='DIVERGENTE'
+    ckm.match_gap_dias,
+    CASE WHEN ckm.match_gap_dias IS NULL THEN NULL
+         WHEN ckm.match_priority = 2     THEN 'DIVERGENTE'
+         WHEN ckm.match_gap_dias = 0     THEN 'EXATO'
+         ELSE 'PROXIMO'
+    END                                                         AS match_confianca,
+    -- valores do documento (sempre origem KMM)
+    kcf.valor_documento_kmm, kcf.valor_icms_kmm, kcf.valor_iss_kmm,
+    -- fatura
+    fc.num_fatura, fc.tipo_docto_fatura, fc.qtd_faturas, fc.qtd_parcelas,
+    fc.valor_fatura, fc.venc_primeiro, fc.venc_ultimo, fc.usuario_fatura,
+    CASE WHEN fc.num_fatura IS NOT NULL THEN 'FATURADO'
+         WHEN kcf.conhecimento_id IS NOT NULL THEN 'SEM FATURA'
+         ELSE NULL
+    END                                                        AS status_fatura,
+    -- historico de cancelamento no contas a receber (KMM), 3 estados:
+    -- NUNCA CANCELADA        -> nenhuma fatura cancelada pro documento
+    -- CANCELADA E REEMITIDA  -> teve cancelamento, mas tem fatura ativa hoje
+    --                           (status_fatura=FATURADO) -- caso real: con_codigo
+    --                           823730/contrato 213306, fatura 388676 (R$9.400)
+    --                           cancelada e substituida no mesmo dia pela 395137
+    --                           (R$6.900) -- nao e problema, e correcao de valor
+    -- CANCELADA SEM REEMISSAO -> teve cancelamento e NAO tem fatura ativa hoje
+    --                            (status_fatura=SEM FATURA) -- esse sim e o caso
+    --                            que precisa de atencao (479 casos)
+    CASE WHEN kcf.conhecimento_id IS NULL     THEN NULL
+         WHEN fcc.conhecimento_id IS NULL     THEN 'NUNCA CANCELADA'
+         WHEN fc.num_fatura IS NOT NULL       THEN 'CANCELADA E REEMITIDA'
+         ELSE 'CANCELADA SEM REEMISSAO'
+    END                                                        AS fatura_cancelada_kmm,
+    -- situacao de pagamento do contas a receber: valor devido = fatura + juro - desconto
+    fc.valor_pago_receber, fc.valor_juro_receber, fc.valor_desconto_receber,
+    CASE WHEN fc.num_fatura IS NULL THEN NULL
+         ELSE GREATEST(fc.valor_fatura + COALESCE(fc.valor_juro_receber,0) - COALESCE(fc.valor_desconto_receber,0) - COALESCE(fc.valor_pago_receber,0), 0)
+    END                                                        AS saldo_aberto_receber,
+    CASE WHEN fc.num_fatura IS NULL THEN NULL
+         WHEN COALESCE(fc.valor_pago_receber,0) <= 0.005 THEN 'EM ABERTO'
+         WHEN fc.valor_pago_receber >= (fc.valor_fatura + COALESCE(fc.valor_juro_receber,0) - COALESCE(fc.valor_desconto_receber,0)) - 0.01 THEN 'QUITADO'
+         ELSE 'PAGAMENTO PARCIAL'
+    END                                                        AS status_pagamento_receber,
+    -- dias entre a emissao do documento e a emissao do titulo no contas a
+    -- receber -- gap grande aqui e sinal de match suspeito ou atraso real
+    -- de faturamento
+    date_diff('day', cm.data_emissao, fc.data_emissao_fatura)  AS dias_emissao_ate_faturamento,
+    fc.data_emissao_fatura,
+    -- fatura de custo (contas a pagar do contrato de frete terceiro)
+    -- e da CARGA, nao do documento -- usa situacao_carga (nao con_status):
+    -- documentos cancelados de uma carga com irmao ativo continuam sem
+    -- mostrar (herdariam por engano do irmao vivo), mas quando a carga
+    -- inteira so tem esse documento (cancelado no Multi e no KMM) e o
+    -- contrato continua valido nos dois lados, o valor nao fica mais
+    -- escondido (caso real: car_codigo_carga_embarcador=213207, con_codigo
+    -- 758014 cancelado, situacao_carga='ATIVA' -- unico documento da carga,
+    -- contrato 209182 valido em ambos os lados, antes sumia por completo)
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.contrato ELSE NULL END AS contrato,
+    CASE WHEN NOT ((cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) AND cm.con_status IN ('A','S')) OR cfp.contrato IS NULL THEN NULL
+         WHEN cfp.contrato_data_cancelamento_kmm IS NOT NULL          THEN 'SIM'
+         ELSE 'NAO'
+    END                                                        AS contrato_cancelado_kmm,
+    CAST(NULL AS integer)                                     AS contrato_avulso,
+    -- valores do contrato e do titulo a pagar (sempre origem KMM) -- mesma
+    -- regra do contrato acima (situacao_carga, nao con_status)
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.valor_contrato_bruto   ELSE NULL END AS valor_contrato_bruto,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.valor_contrato_liquido ELSE NULL END AS valor_contrato_liquido,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.num_titulo_pagar ELSE NULL END AS num_titulo_pagar,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.valor_titulo_pagar ELSE NULL END AS valor_titulo_pagar,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.usuario_titulo_pagar ELSE NULL END AS usuario_titulo_pagar,
+    CASE WHEN NOT ((cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) AND cm.con_status IN ('A','S'))                      THEN 'NAO APLICAVEL - DOCUMENTO CANCELADO'
+         -- titulo escolhido (rn=1 no cft_pagar_raw) e ele mesmo estornado, sem
+         -- substituto ativo -- nao e "FATURADO" de verdade, foi revertido no
+         -- KMM (caso real: car_codigo_carga_embarcador=220590, titulo 279035,
+         -- contrato 213454, ambos com data_estorno/data_cancelamento preenchidos)
+         WHEN cfp.titulo_pagar_data_estorno IS NOT NULL        THEN 'ESTORNADO'
+         WHEN cfp.num_titulo_pagar IS NOT NULL                 THEN 'FATURADO'
+         WHEN cfp.car_codigo_carga_embarcador IS NOT NULL      THEN 'SEM FATURA PAGAR'
+         ELSE NULL
+    END                                                        AS status_fatura_pagar,
+    -- mesma logica de 3 estados do lado receber, aplicada ao titulo a pagar
+    -- (data_estorno em vez de cancelado, ver titulo_pagar_estornado)
+    CASE WHEN NOT ((cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) AND cm.con_status IN ('A','S')) OR cfp.contrato IS NULL THEN NULL
+         WHEN NOT cfp.teve_titulo_pagar_estornado                   THEN 'NUNCA CANCELADA'
+         WHEN cfp.num_titulo_pagar IS NOT NULL
+              AND cfp.titulo_pagar_data_estorno IS NULL             THEN 'CANCELADA E REEMITIDA'
+         ELSE 'CANCELADA SEM REEMISSAO'
+    END                                                        AS fatura_pagar_cancelada_kmm,
+    -- situacao de pagamento do titulo pago ao transportador
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.valor_pago_pagar     ELSE NULL END AS valor_pago_pagar,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.valor_juro_pagar     ELSE NULL END AS valor_juro_pagar,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.valor_desconto_pagar ELSE NULL END AS valor_desconto_pagar,
+    coc.custo_ocorrencia,
+    CASE WHEN NOT ((cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) AND cm.con_status IN ('A','S')) OR cfp.num_titulo_pagar IS NULL THEN NULL
+         WHEN cfp.titulo_pagar_data_estorno IS NOT NULL THEN 'ESTORNADO'
+         WHEN COALESCE(cfp.valor_pago_pagar,0) <= 0.005 THEN 'EM ABERTO'
+         WHEN cfp.valor_pago_pagar >= (cfp.valor_titulo_pagar + COALESCE(cfp.valor_juro_pagar,0) - COALESCE(cfp.valor_desconto_pagar,0)) - 0.01 THEN 'QUITADO'
+         ELSE 'PAGAMENTO PARCIAL'
+    END                                                        AS status_pagamento_pagar,
+    -- prazo entre pagar o custo (transportador) e receber do cliente
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.data_ref_pagar ELSE NULL END AS data_ref_pagar,
+    fc.data_ref_receber,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) AND cfp.data_ref_pagar IS NOT NULL AND fc.data_ref_receber IS NOT NULL
+         THEN date_diff('day', cfp.data_ref_pagar, fc.data_ref_receber)
+         ELSE NULL
+    END                                                        AS prazo_dias,
+    CASE WHEN NOT ((cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) AND cm.con_status IN ('A','S')) OR cfp.data_ref_pagar IS NULL OR fc.data_ref_receber IS NULL THEN NULL
+         WHEN COALESCE(cfp.pagar_tem_estimado,1) = 0 AND COALESCE(fc.receber_tem_parcela_estimada,1) = 0 THEN 'REAL'
+         ELSE 'ESTIMADO'
+    END                                                        AS prazo_tipo,
+    -- margem: receita (fatura) - custo (titulo a pagar) - custo de ocorrencia
+    -- da carga; formula confirmada batendo com valores reais da hml_gold
+    CASE WHEN fc.valor_fatura IS NULL THEN NULL
+         ELSE fc.valor_fatura - COALESCE(cfp.valor_titulo_pagar,0) - COALESCE(coc.custo_ocorrencia,0)
+    END                                                        AS margem_bruta,
+    CASE WHEN fc.valor_fatura IS NULL OR fc.valor_fatura = 0 THEN NULL
+         ELSE (fc.valor_fatura - COALESCE(cfp.valor_titulo_pagar,0) - COALESCE(coc.custo_ocorrencia,0)) / fc.valor_fatura
+    END                                                        AS margem_pct,
+    -- integracao
+    CASE
+        WHEN kcf.conhecimento_id IS NULL AND cm.con_status IN ('A','S')     THEN 'NAO INTEGRADO'
+        -- 'I' (Inutilizado) = numeracao anulada no SEFAZ ANTES de autorizar --
+        -- por definicao nunca vira documento fiscal valido, entao nunca tem
+        -- par de verdade no KMM (nao e gap de integracao, e esperado). Validado
+        -- contra os dados reais: dos CT-e 'I', 1168 de 1169 (99,9%) ja caem
+        -- aqui sem par no KMM -- so 1 caso real de divergencia (kmm.cancelado
+        -- IS NULL), que continua caindo no WHEN de baixo, nao aqui (essa regra
+        -- so pega quando kcf.conhecimento_id IS NULL, nao mexe nesse 1 caso)
+        WHEN kcf.conhecimento_id IS NULL AND cm.con_status = 'I'            THEN 'NAO APLICAVEL - CTE INUTILIZADO'
+        WHEN kcf.conhecimento_id IS NULL AND cm.con_status NOT IN ('A','S') THEN 'CANCELADO SEM KMM'
+        WHEN cm.con_status NOT IN ('A','S') AND kcf.cancelado IS NULL       THEN 'DIVERGENCIA - CANCELADO MULTI / VALIDO KMM'
+        WHEN cm.con_status IN ('A','S') AND kcf.cancelado IS NOT NULL       THEN 'DIVERGENCIA - VALIDO MULTI / CANCELADO KMM'
+        ELSE 'INTEGRADO'
+    END                                                        AS status_integracao,
+    -- REGRAS DE NEGOCIO (nao sao erro de integracao Multi x KMM, sao desvio
+    -- de processo interno) -- primeira regra: cooperado tipo 1/2 (COOP 1/2 PJ)
+    -- nao deveria ser pago via operador REPOM (serie_formulario 'REPOM%' no
+    -- contrato KMM). Validado contra dados reais: COOP 1 PJ viola em 0,9% dos
+    -- contratos (87/9.603), COOP 2 PJ em 9,9% (54/547) -- desproporcional.
+    cm.tipo_cooperado,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S')) THEN cfp.operador_contrato ELSE NULL END AS operador_pagamento_contrato,
+    CASE WHEN (cm.situacao_carga = 'ATIVA' AND cm.con_status IN ('A','S'))
+          AND cm.tipo_cooperado_codigo IN (1,2)
+          AND cfp.operador_contrato LIKE 'REPOM%'
+         THEN 'COOPERADO TIPO ' || CAST(cm.tipo_cooperado_codigo AS varchar) || ' PAGO VIA REPOM'
+    END                                                        AS divergencia_negocio,
+    -- fallback de contas a receber (ver bloco 4b) -- so preenchido quando
+    -- NAO ha match fiscal (num_fatura/valor_fatura ja vem do caminho normal
+    -- nesse caso); estimado por CNPJ+valor+data, nao confirmado pelo
+    -- documento fiscal -- por isso campo separado, nao sobrescreve num_fatura
+    rfc.num_docto                                              AS num_fatura_estimada,
+    rfc.valor_docto                                            AS valor_fatura_estimada,
+    rfc.gap_dias                                               AS gap_dias_fatura_estimada,
+    kcf.usuario_doc_kmm                                        AS usuario_doc_kmm,
+    cm.tipo_operacao_anulacao                                  AS tipo_operacao,
+    CASE WHEN upper(cm.tipo_operacao_anulacao) LIKE '%ANULACAO%' THEN 'SIM' ELSE 'NAO' END AS doc_anulacao,
+    CAST(cm.max_con_anulacao AS bigint)                        AS con_anulacao_ref,
+    CAST(cm.vlr_receita_bruta_multi AS double)                 AS vlr_receita_bruta_multi,
+    cm.no_painel                                               AS no_painel,
+    cm.motivo_fora_painel                                      AS motivo_fora_painel
+FROM cte_multi cm
+LEFT JOIN cte_kmm_match ckm ON ckm.con_codigo = cm.con_codigo
+LEFT JOIN kmm_enriquecido kcf ON kcf.conhecimento_id = ckm.conhecimento_id
+LEFT JOIN fatura_cte fc ON fc.conhecimento_id = kcf.conhecimento_id
+LEFT JOIN fatura_cancelada_cte fcc ON fcc.conhecimento_id = kcf.conhecimento_id
+LEFT JOIN cft_pagar cfp ON cfp.car_codigo_carga_embarcador = cm.car_codigo_carga_embarcador
+LEFT JOIN custo_ocorrencia_por_carga coc ON coc.car_codigo_carga_embarcador = cm.car_codigo_carga_embarcador
+LEFT JOIN receber_fallback_cte_match rfc ON rfc.con_codigo = cm.con_codigo
+
+UNION ALL
+
+-- ============================================================
+-- SELECT FINAL -- BLOCO NF
+-- ============================================================
+SELECT
+    'NF'                                                       AS tipo_analise,
+    year(nm.data_emissao)                                      AS ano_emissao,
+    nm.tipo_documento,
+    nm.cte, nm.con_codigo, nm.con_status,
+    nm.car_codigo_carga_embarcador,
+    nm.sk_filial, nm.sk_cliente, nm.sk_cooperado, nm.sk_documento,
+    CASE nm.con_status
+        WHEN 'A' THEN 'Autorizado'  WHEN 'S' THEN 'Substituido'
+        WHEN 'C' THEN 'Cancelado'   WHEN 'I' THEN 'Inutilizado'
+        WHEN 'R' THEN 'Rejeitado'   WHEN 'Z' THEN 'Denegado'
+        ELSE nm.con_status
+    END                                                        AS status_multi_descricao,
+    nm.data_emissao,
+    nm.cnpj_tomador, nm.nome_tomador, nm.grupo_tomador, nm.tem_grupo_pagador, nm.filial_multi, nm.filial_duplicada,
+    nm.cooperado, nm.vei_placa, nm.inicio_da_prestacao, nm.fim_da_prestacao,
+    nm.situacao_carga, nm.doc_fiscal, nm.emissao_manual, nm.qtd_cargas, nm.multiplas_cargas,
+    nm.mod_abreviacao, nm.tipodocumento,
+    nm.ciot,
+    nm.vinculo_carga,
+    CASE WHEN nm.tipo_operacao_anulacao LIKE '%TRANSBORDO%'     THEN 'SIM'       ELSE 'NAO'    END AS transbordo,
+    CASE WHEN nm.oco_anulacao IS NOT NULL
+          OR ((nm.has_true = 0) AND (nm.flag_anulacao = FALSE) AND (nm.con_codigo = nm.max_con_anulacao))
+          OR ((nm.has_true = 1) AND (nm.flag_anulacao = TRUE OR nm.flag_anulacao IS NOT NULL))
+         THEN 'SIM' ELSE 'NAO' END                             AS anulacao,
+    -- lado KMM
+    nkm.num_nota_id                                            AS kmm_doc_id,
+    mf.filial_nome                                             AS filial_kmm,
+    nm.filial_contabil,
+    CAST(nkm.unidade_negocio_kmm AS varchar)                   AS unidade_negocio_kmm,
+    CAST(NULL AS varchar)                                      AS origem_mapeamento,
+    -- ATENCAO: nf_es.cancelada e flag bigint 0/1 (nao timestamp como conhecimento.cancelado)
+    CASE WHEN nkm.num_nota_id IS NULL THEN NULL
+         WHEN nkm.cancelada = 0 THEN 'Ativo' ELSE 'Cancelado'
+    END                                                        AS status_kmm_descricao,
+    CAST(nkm.match_priority AS varchar)                        AS match_priority_nf,
+    -- aderencia do match NF x KMM: gap de dias entre as emissoes (P6/P7 nao
+    -- exigem data, entao esse numero e o unico jeito de saber o quao longe
+    -- ficou nesses casos) + categoria baseada na regra que venceu (P1-P2 =
+    -- serie+cnpj+data+valor batendo = mais confiavel; P6-P7 = sem serie)
+    nkm.match_gap_dias,
+    CASE WHEN nkm.match_priority IS NULL THEN NULL
+         WHEN nkm.match_priority <= 2    THEN 'EXATO'
+         WHEN nkm.match_priority <= 5    THEN 'ALTA'
+         ELSE 'BAIXA'
+    END                                                         AS match_confianca,
+    -- valores do documento (sempre origem KMM)
+    nkm.valor_documento_kmm, nkm.valor_icms_kmm, nkm.valor_iss_kmm,
+    -- fatura
+    fn.num_fatura, fn.tipo_docto_fatura, fn.qtd_faturas, fn.qtd_parcelas,
+    fn.valor_fatura, fn.venc_primeiro, fn.venc_ultimo, fn.usuario_fatura,
+    CASE WHEN fn.num_fatura IS NOT NULL THEN 'FATURADO'
+         WHEN nkm.num_nota_id IS NOT NULL THEN 'SEM FATURA'
+         ELSE NULL
+    END                                                        AS status_fatura,
+    -- mesma logica de 3 estados do bloco CT-e (ver comentario la)
+    CASE WHEN nkm.num_nota_id IS NULL      THEN NULL
+         WHEN fcn.num_nota_id IS NULL      THEN 'NUNCA CANCELADA'
+         WHEN fn.num_fatura IS NOT NULL    THEN 'CANCELADA E REEMITIDA'
+         ELSE 'CANCELADA SEM REEMISSAO'
+    END                                                        AS fatura_cancelada_kmm,
+    -- situacao de pagamento do contas a receber
+    fn.valor_pago_receber, fn.valor_juro_receber, fn.valor_desconto_receber,
+    CASE WHEN fn.num_fatura IS NULL THEN NULL
+         ELSE GREATEST(fn.valor_fatura + COALESCE(fn.valor_juro_receber,0) - COALESCE(fn.valor_desconto_receber,0) - COALESCE(fn.valor_pago_receber,0), 0)
+    END                                                        AS saldo_aberto_receber,
+    CASE WHEN fn.num_fatura IS NULL THEN NULL
+         WHEN COALESCE(fn.valor_pago_receber,0) <= 0.005 THEN 'EM ABERTO'
+         WHEN fn.valor_pago_receber >= (fn.valor_fatura + COALESCE(fn.valor_juro_receber,0) - COALESCE(fn.valor_desconto_receber,0)) - 0.01 THEN 'QUITADO'
+         ELSE 'PAGAMENTO PARCIAL'
+    END                                                        AS status_pagamento_receber,
+    -- dias entre a emissao do documento e a emissao do titulo no contas a
+    -- receber -- gap grande aqui e sinal de match suspeito ou atraso real
+    -- de faturamento
+    date_diff('day', nm.data_emissao, fn.data_emissao_fatura)  AS dias_emissao_ate_faturamento,
+    fn.data_emissao_fatura,
+    -- fatura de custo (contas a pagar do contrato de frete terceiro) --
+    -- situacao_carga, nao con_status (mesmo motivo/caso real do bloco CT-e)
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.contrato ELSE NULL END AS contrato,
+    CASE WHEN NOT ((nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) AND nm.con_status IN ('A','S')) OR cfp.contrato IS NULL THEN NULL
+         WHEN cfp.contrato_data_cancelamento_kmm IS NOT NULL          THEN 'SIM'
+         ELSE 'NAO'
+    END                                                        AS contrato_cancelado_kmm,
+    CAST(NULL AS integer)                                     AS contrato_avulso,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.valor_contrato_bruto   ELSE NULL END AS valor_contrato_bruto,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.valor_contrato_liquido ELSE NULL END AS valor_contrato_liquido,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.num_titulo_pagar ELSE NULL END AS num_titulo_pagar,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.valor_titulo_pagar ELSE NULL END AS valor_titulo_pagar,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.usuario_titulo_pagar ELSE NULL END AS usuario_titulo_pagar,
+    CASE WHEN NOT ((nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) AND nm.con_status IN ('A','S'))                      THEN 'NAO APLICAVEL - DOCUMENTO CANCELADO'
+         WHEN cfp.titulo_pagar_data_estorno IS NOT NULL        THEN 'ESTORNADO'
+         WHEN cfp.num_titulo_pagar IS NOT NULL                 THEN 'FATURADO'
+         WHEN cfp.car_codigo_carga_embarcador IS NOT NULL      THEN 'SEM FATURA PAGAR'
+         ELSE NULL
+    END                                                        AS status_fatura_pagar,
+    CASE WHEN NOT ((nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) AND nm.con_status IN ('A','S')) OR cfp.contrato IS NULL THEN NULL
+         WHEN NOT cfp.teve_titulo_pagar_estornado                   THEN 'NUNCA CANCELADA'
+         WHEN cfp.num_titulo_pagar IS NOT NULL
+              AND cfp.titulo_pagar_data_estorno IS NULL             THEN 'CANCELADA E REEMITIDA'
+         ELSE 'CANCELADA SEM REEMISSAO'
+    END                                                        AS fatura_pagar_cancelada_kmm,
+    -- situacao de pagamento do titulo pago ao transportador
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.valor_pago_pagar     ELSE NULL END AS valor_pago_pagar,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.valor_juro_pagar     ELSE NULL END AS valor_juro_pagar,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.valor_desconto_pagar ELSE NULL END AS valor_desconto_pagar,
+    coc.custo_ocorrencia,
+    CASE WHEN NOT ((nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) AND nm.con_status IN ('A','S')) OR cfp.num_titulo_pagar IS NULL THEN NULL
+         WHEN cfp.titulo_pagar_data_estorno IS NOT NULL THEN 'ESTORNADO'
+         WHEN COALESCE(cfp.valor_pago_pagar,0) <= 0.005 THEN 'EM ABERTO'
+         WHEN cfp.valor_pago_pagar >= (cfp.valor_titulo_pagar + COALESCE(cfp.valor_juro_pagar,0) - COALESCE(cfp.valor_desconto_pagar,0)) - 0.01 THEN 'QUITADO'
+         ELSE 'PAGAMENTO PARCIAL'
+    END                                                        AS status_pagamento_pagar,
+    -- prazo entre pagar o custo (transportador) e receber do cliente
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.data_ref_pagar ELSE NULL END AS data_ref_pagar,
+    fn.data_ref_receber,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) AND cfp.data_ref_pagar IS NOT NULL AND fn.data_ref_receber IS NOT NULL
+         THEN date_diff('day', cfp.data_ref_pagar, fn.data_ref_receber)
+         ELSE NULL
+    END                                                        AS prazo_dias,
+    CASE WHEN NOT ((nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) AND nm.con_status IN ('A','S')) OR cfp.data_ref_pagar IS NULL OR fn.data_ref_receber IS NULL THEN NULL
+         WHEN COALESCE(cfp.pagar_tem_estimado,1) = 0 AND COALESCE(fn.receber_tem_parcela_estimada,1) = 0 THEN 'REAL'
+         ELSE 'ESTIMADO'
+    END                                                        AS prazo_tipo,
+    -- margem: receita (fatura) - custo (titulo a pagar) - custo de ocorrencia da carga
+    CASE WHEN fn.valor_fatura IS NULL THEN NULL
+         ELSE fn.valor_fatura - COALESCE(cfp.valor_titulo_pagar,0) - COALESCE(coc.custo_ocorrencia,0)
+    END                                                        AS margem_bruta,
+    CASE WHEN fn.valor_fatura IS NULL OR fn.valor_fatura = 0 THEN NULL
+         ELSE (fn.valor_fatura - COALESCE(cfp.valor_titulo_pagar,0) - COALESCE(coc.custo_ocorrencia,0)) / fn.valor_fatura
+    END                                                        AS margem_pct,
+    -- integracao
+    CASE
+        WHEN nm.escopo_kmm = 'NAO FISCAL'                               THEN 'NAO APLICAVEL - DOC NAO FISCAL'
+        WHEN nkm.num_nota_id IS NULL AND nm.con_status IN ('A','S')     THEN 'NAO INTEGRADO'
+        WHEN nkm.num_nota_id IS NULL AND nm.con_status NOT IN ('A','S') THEN 'CANCELADO SEM KMM'
+        WHEN nm.con_status NOT IN ('A','S') AND nkm.cancelada = 0        THEN 'DIVERGENCIA - CANCELADO MULTI / VALIDO KMM'
+        WHEN nm.con_status IN ('A','S')     AND nkm.cancelada = 1        THEN 'DIVERGENCIA - VALIDO MULTI / CANCELADO KMM'
+        ELSE 'INTEGRADO'
+    END                                                        AS status_integracao,
+    -- REGRAS DE NEGOCIO -- ver comentario no bloco CT-e
+    nm.tipo_cooperado,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S')) THEN cfp.operador_contrato ELSE NULL END AS operador_pagamento_contrato,
+    CASE WHEN (nm.situacao_carga = 'ATIVA' AND nm.con_status IN ('A','S'))
+          AND nm.tipo_cooperado_codigo IN (1,2)
+          AND cfp.operador_contrato LIKE 'REPOM%'
+         THEN 'COOPERADO TIPO ' || CAST(nm.tipo_cooperado_codigo AS varchar) || ' PAGO VIA REPOM'
+    END                                                        AS divergencia_negocio,
+    -- fallback de contas a receber -- ver comentario no bloco CT-e (4b)
+    rfn.num_docto                                              AS num_fatura_estimada,
+    rfn.valor_docto                                            AS valor_fatura_estimada,
+    rfn.gap_dias                                               AS gap_dias_fatura_estimada,
+    nkm.usuario_doc_kmm                                        AS usuario_doc_kmm,
+    nm.tipo_operacao_anulacao                                  AS tipo_operacao,
+    CASE WHEN upper(nm.tipo_operacao_anulacao) LIKE '%ANULACAO%' THEN 'SIM' ELSE 'NAO' END AS doc_anulacao,
+    CAST(nm.max_con_anulacao AS bigint)                        AS con_anulacao_ref,
+    CAST(nm.vlr_receita_bruta_multi AS double)                 AS vlr_receita_bruta_multi,
+    nm.no_painel                                               AS no_painel,
+    nm.motivo_fora_painel                                      AS motivo_fora_painel
+FROM nf_multi nm
+LEFT JOIN nf_kmm_match nkm ON nkm.con_codigo = nm.con_codigo
+LEFT JOIN mapa mf          ON mf.cod_centro_custo = nkm.cod_centro_custo
+LEFT JOIN fatura_nf fn     ON fn.num_nota_id = nkm.num_nota_id
+LEFT JOIN fatura_cancelada_nf fcn ON fcn.num_nota_id = nkm.num_nota_id
+LEFT JOIN cft_pagar cfp    ON cfp.car_codigo_carga_embarcador = nm.car_codigo_carga_embarcador
+LEFT JOIN custo_ocorrencia_por_carga coc ON coc.car_codigo_carga_embarcador = nm.car_codigo_carga_embarcador
+LEFT JOIN receber_fallback_nf_match rfn ON rfn.con_codigo = nm.con_codigo
+
+UNION ALL
+
+-- ------------------------------------------------------------
+-- SELECT FINAL -- BLOCO OCORRENCIA (contrato avulso / pagamento motorista)
+-- ------------------------------------------------------------
+SELECT
+    'OCORRENCIA'                                               AS tipo_analise,
+    year(av.pam_data_pagamento)                                 AS ano_emissao,
+    'CTRANSP'                                                   AS tipo_documento,
+    CAST(NULL AS varchar)                                       AS cte,
+    CAST(NULL AS integer)                                       AS con_codigo,
+    CAST(NULL AS varchar)                                       AS con_status,
+    av.car_codigo_carga_embarcador,
+    -- sk_filial nao mapeado aqui: avulso/pagamento motorista nao passa pela
+    -- fato_operacional (nao tem con_codigo/pedido), e nao achamos a origem
+    -- real do sk_filial/filial_contabil da OCORRENCIA na v5 (multi_dbo_t_carga
+    -- nao expoe nome de filial). -1/NULL por enquanto, gap conhecido.
+    CAST(-1 AS integer)                                          AS sk_filial,
+    CAST(-1 AS integer)                                          AS sk_cliente,
+    CAST(-1 AS bigint)                                           AS sk_cooperado,
+    CAST(-1 AS integer)                                          AS sk_documento,
+    'Pagamento Motorista'                                       AS status_multi_descricao,
+    DATE(av.pam_data_pagamento)                                 AS data_emissao,
+    CAST(av.cnpj_transportador AS varchar)                      AS cnpj_tomador,
+    CAST(NULL AS varchar)                                       AS nome_tomador,
+    -- cnpj_tomador aqui e do TRANSPORTADOR (nao do pagador do frete), entao
+    -- nao faz sentido aplicar o grupo economico do tomador -- fica NULL
+    CAST(NULL AS varchar)                                       AS grupo_tomador,
+    CAST(NULL AS varchar)                                       AS tem_grupo_pagador,
+    CAST(NULL AS varchar)                                       AS filial_multi,
+    CAST(NULL AS varchar)                                       AS filial_duplicada,
+    av.cooperado,
+    CAST(NULL AS varchar)                                       AS vei_placa,
+    CAST(NULL AS varchar)                                       AS inicio_da_prestacao,
+    CAST(NULL AS varchar)                                       AS fim_da_prestacao,
+    CASE WHEN av.car_situacao IN (18,13) THEN 'CANCELADA' ELSE 'ATIVA' END AS situacao_carga,
+    'NAO'                                                        AS doc_fiscal,
+    CAST(NULL AS varchar)                                       AS emissao_manual,
+    CAST(NULL AS bigint)                                         AS qtd_cargas,
+    CAST(NULL AS varchar)                                       AS multiplas_cargas,
+    'PAGAMENTO'                                                  AS mod_abreviacao,
+    'CTRANSP'                                                    AS tipodocumento,
+    CAST(NULL AS varchar)                                       AS ciot,
+    CAST(NULL AS varchar)                                       AS vinculo_carga,
+    CAST(NULL AS varchar)                                       AS transbordo,
+    CAST(NULL AS varchar)                                       AS anulacao,
+    -- lado KMM
+    km.lancto_id                                                AS kmm_doc_id,
+    CAST(NULL AS varchar)                                       AS filial_kmm,
+    CAST(NULL AS varchar)                                       AS filial_contabil,
+    CAST(NULL AS varchar)                                       AS unidade_negocio_kmm,
+    CAST(NULL AS varchar)                                       AS origem_mapeamento,
+    CASE WHEN km.lancto_id IS NULL THEN NULL
+         WHEN km.data_cancelamento IS NULL THEN 'Ativo' ELSE 'Cancelado'
+    END                                                          AS status_kmm_descricao,
+    CAST(NULL AS varchar)                                       AS match_priority_nf,
+    -- OCORRENCIA casa por chave exata (num_formulario+serie 'P'+pessoa),
+    -- sem ambiguidade de data pra medir -- nao se aplica aderencia aqui
+    CAST(NULL AS bigint)                                         AS match_gap_dias,
+    CAST(NULL AS varchar)                                       AS match_confianca,
+    -- OCORRENCIA nao tem "documento fiscal" proprio (nao ha NF/CT-e aqui)
+    CAST(NULL AS double)                                         AS valor_documento_kmm,
+    CAST(NULL AS double)                                         AS valor_icms_kmm,
+    CAST(NULL AS double)                                         AS valor_iss_kmm,
+    -- OCORRENCIA nao tem lado "contas a receber" (nao ha cobranca de cliente aqui)
+    CAST(NULL AS varchar)                                       AS num_fatura,
+    CAST(NULL AS varchar)                                       AS tipo_docto_fatura,
+    CAST(NULL AS bigint)                                         AS qtd_faturas,
+    CAST(NULL AS bigint)                                         AS qtd_parcelas,
+    CAST(av.pam_valor AS double)                                AS valor_fatura,
+    CAST(NULL AS date)                                           AS venc_primeiro,
+    CAST(NULL AS date)                                           AS venc_ultimo,
+    CAST(NULL AS varchar)                                       AS usuario_fatura,
+    CAST(NULL AS varchar)                                       AS status_fatura,
+    CAST(NULL AS varchar)                                       AS fatura_cancelada_kmm,
+    -- OCORRENCIA nao tem "contas a receber" -- sem situacao de pagamento nesse lado
+    CAST(NULL AS double)                                         AS valor_pago_receber,
+    CAST(NULL AS double)                                         AS valor_juro_receber,
+    CAST(NULL AS double)                                         AS valor_desconto_receber,
+    CAST(NULL AS double)                                         AS saldo_aberto_receber,
+    CAST(NULL AS varchar)                                       AS status_pagamento_receber,
+    CAST(NULL AS bigint)                                         AS dias_emissao_ate_faturamento,
+    CAST(NULL AS date)                                           AS data_emissao_fatura,
+    -- fatura de custo (contas a pagar) -- titulo vinculado ao contrato avulso
+    CAST(NULL AS integer)                                       AS contrato,
+    CAST(NULL AS varchar)                                       AS contrato_cancelado_kmm,
+    av.pam_numero                                               AS contrato_avulso,
+    km.valor_contrato_bruto,
+    km.valor_contrato_liquido,
+    cp.num_docto                                                AS num_titulo_pagar,
+    cp.valor_docto                                               AS valor_titulo_pagar,
+    cp.user_insert                                               AS usuario_titulo_pagar,
+    CASE WHEN cp.data_estorno IS NOT NULL THEN 'ESTORNADO'
+         WHEN cp.num_docto IS NOT NULL THEN 'FATURADO'
+         WHEN km.lancto_id IS NOT NULL THEN 'SEM FATURA PAGAR'
+         ELSE NULL
+    END                                                          AS status_fatura_pagar,
+    -- OCORRENCIA usa outro caminho pro titulo a pagar (avulso, nao cft) --
+    -- historico completo (CANCELADA E REEMITIDA vs SEM REEMISSAO) ainda e
+    -- gap conhecido aqui, mas status_fatura_pagar/status_pagamento_pagar ja
+    -- refletem o estorno (cp e a linha crua de kmm_finan_finan_contas_pagar,
+    -- cp.data_estorno direto)
+    CAST(NULL AS varchar)                                       AS fatura_pagar_cancelada_kmm,
+    -- situacao de pagamento do titulo pago ao transportador
+    pp.valor_pago                                                AS valor_pago_pagar,
+    pj.valor_juro                                                AS valor_juro_pagar,
+    pd.valor_desconto                                            AS valor_desconto_pagar,
+    CAST(NULL AS double)                                         AS custo_ocorrencia,
+    CASE WHEN cp.num_docto IS NULL THEN NULL
+         WHEN cp.data_estorno IS NOT NULL THEN 'ESTORNADO'
+         WHEN COALESCE(pp.valor_pago,0) <= 0.005 THEN 'EM ABERTO'
+         WHEN pp.valor_pago >= (cp.valor_docto + COALESCE(pj.valor_juro,0) - COALESCE(pd.valor_desconto,0)) - 0.01 THEN 'QUITADO'
+         ELSE 'PAGAMENTO PARCIAL'
+    END                                                          AS status_pagamento_pagar,
+    -- OCORRENCIA nao tem lado "receber" pra comparar -- sem prazo pagar-receber
+    CAST(NULL AS date)                                           AS data_ref_pagar,
+    CAST(NULL AS date)                                           AS data_ref_receber,
+    CAST(NULL AS bigint)                                         AS prazo_dias,
+    CAST(NULL AS varchar)                                       AS prazo_tipo,
+    CAST(NULL AS double)                                         AS margem_bruta,
+    CAST(NULL AS double)                                         AS margem_pct,
+    -- integracao
+    CASE
+        WHEN av.cod_pessoa_kmm IS NULL         THEN 'NAO INTEGRADO - PESSOA SEM CADASTRO KMM'
+        WHEN km.lancto_id IS NULL              THEN 'NAO INTEGRADO'
+        WHEN km.data_cancelamento IS NOT NULL  THEN 'DIVERGENCIA - CANCELADO NO KMM'
+        ELSE 'INTEGRADO'
+    END                                                          AS status_integracao,
+    -- REGRAS DE NEGOCIO -- nao se aplica aqui: OCORRENCIA usa contrato avulso
+    -- (serie_formulario sempre 'P'), nunca REPOM, e nao passa por dim_cooperado
+    CAST(NULL AS varchar)                                       AS tipo_cooperado,
+    CAST(NULL AS varchar)                                       AS operador_pagamento_contrato,
+    CAST(NULL AS varchar)                                       AS divergencia_negocio,
+    -- fallback de contas a receber -- nao se aplica: OCORRENCIA nao e
+    -- documento fiscal, nao tem lado receber
+    CAST(NULL AS varchar)                                       AS num_fatura_estimada,
+    CAST(NULL AS double)                                         AS valor_fatura_estimada,
+    CAST(NULL AS bigint)                                         AS gap_dias_fatura_estimada,
+    km.usuario_doc_kmm                                           AS usuario_doc_kmm,
+    CAST(NULL AS varchar)                                        AS tipo_operacao,
+    CAST(NULL AS varchar)                                        AS doc_anulacao,
+    CAST(NULL AS bigint)                                         AS con_anulacao_ref,
+    CAST(NULL AS double)                                         AS vlr_receita_bruta_multi,
+    CAST(NULL AS varchar)                                        AS no_painel,
+    CAST(NULL AS varchar)                                        AS motivo_fora_painel
+FROM avulso_enriquecido av
+LEFT JOIN avulso_kmm_match km            ON km.pam_codigo = av.pam_codigo
+LEFT JOIN titulo_pagar_por_lancto pg     ON pg.lancto_id = km.lancto_id
+LEFT JOIN prd_bronze.kmm_finan_finan_contas_pagar cp ON cp.contas_pagar_id = pg.contas_pagar_id
+LEFT JOIN pagar_pago pp     ON pp.contas_pagar_id = cp.contas_pagar_id
+LEFT JOIN pagar_juro pj     ON pj.contas_pagar_id = cp.contas_pagar_id
+LEFT JOIN pagar_desconto pd ON pd.contas_pagar_id = cp.contas_pagar_id
+
+UNION ALL
+
+-- ------------------------------------------------------------
+-- SELECT FINAL -- BLOCO SEM DOCUMENTO (carga sem CT-e/NF vinculado)
+-- ------------------------------------------------------------
+SELECT
+    'SEM DOCUMENTO'                                             AS tipo_analise,
+    year(cs.data_criacao)                                       AS ano_emissao,
+    'SEM DOCUMENTO'                                             AS tipo_documento,
+    CAST(NULL AS varchar)                                       AS cte,
+    CAST(NULL AS integer)                                       AS con_codigo,
+    CAST(NULL AS varchar)                                       AS con_status,
+    cs.car_codigo_carga_embarcador,
+    CAST(-1 AS integer)                                          AS sk_filial,
+    CAST(-1 AS integer)                                          AS sk_cliente,
+    CAST(-1 AS bigint)                                           AS sk_cooperado,
+    CAST(-1 AS integer)                                          AS sk_documento,
+    'Carga sem documento'                                       AS status_multi_descricao,
+    cs.data_criacao                                             AS data_emissao,
+    CAST(NULL AS varchar)                                       AS cnpj_tomador,
+    CAST(NULL AS varchar)                                       AS nome_tomador,
+    CAST(NULL AS varchar)                                       AS grupo_tomador,
+    CAST(NULL AS varchar)                                       AS tem_grupo_pagador,
+    CAST(NULL AS varchar)                                       AS filial_multi,
+    CAST(NULL AS varchar)                                       AS filial_duplicada,
+    CAST(NULL AS varchar)                                       AS cooperado,
+    CAST(NULL AS varchar)                                       AS vei_placa,
+    CAST(NULL AS varchar)                                       AS inicio_da_prestacao,
+    CAST(NULL AS varchar)                                       AS fim_da_prestacao,
+    CASE WHEN cs.car_situacao IN (18,13) THEN 'CANCELADA' ELSE 'ATIVA' END AS situacao_carga,
+    'NAO'                                                        AS doc_fiscal,
+    CAST(NULL AS varchar)                                       AS emissao_manual,
+    CAST(NULL AS bigint)                                         AS qtd_cargas,
+    CAST(NULL AS varchar)                                       AS multiplas_cargas,
+    CAST(NULL AS varchar)                                       AS mod_abreviacao,
+    'SEM DOCUMENTO'                                             AS tipodocumento,
+    -- mesma regra de CIOT dos outros blocos, so que ligado direto pelo
+    -- car_codigo (nao ha con_codigo/CT-e pra passar por multi_dbo_t_carga_cte)
+    CASE WHEN cpc.qtd_ciot IS NULL OR cpc.qtd_ciot = 0 THEN 'NAO APLICAVEL'
+         WHEN cpc.tem_ciot_ativo                       THEN 'VALIDO'
+         ELSE 'CANCELADO'
+    END                                                          AS ciot,
+    -- SEM DOCUMENTO ja E o inverso disso (carga sem nenhum documento) -- nao
+    -- se aplica o conceito de "documento sem vinculo de carga" aqui
+    CAST(NULL AS varchar)                                       AS vinculo_carga,
+    CAST(NULL AS varchar)                                       AS transbordo,
+    CAST(NULL AS varchar)                                       AS anulacao,
+    CAST(NULL AS bigint)                                         AS kmm_doc_id,
+    CAST(NULL AS varchar)                                       AS filial_kmm,
+    CAST(NULL AS varchar)                                       AS filial_contabil,
+    CAST(NULL AS varchar)                                       AS unidade_negocio_kmm,
+    CAST(NULL AS varchar)                                       AS origem_mapeamento,
+    CAST(NULL AS varchar)                                       AS status_kmm_descricao,
+    CAST(NULL AS varchar)                                       AS match_priority_nf,
+    CAST(NULL AS bigint)                                         AS match_gap_dias,
+    CAST(NULL AS varchar)                                       AS match_confianca,
+    CAST(NULL AS double)                                         AS valor_documento_kmm,
+    CAST(NULL AS double)                                         AS valor_icms_kmm,
+    CAST(NULL AS double)                                         AS valor_iss_kmm,
+    CAST(NULL AS varchar)                                       AS num_fatura,
+    CAST(NULL AS varchar)                                       AS tipo_docto_fatura,
+    CAST(NULL AS bigint)                                         AS qtd_faturas,
+    CAST(NULL AS bigint)                                         AS qtd_parcelas,
+    CAST(NULL AS double)                                         AS valor_fatura,
+    CAST(NULL AS date)                                           AS venc_primeiro,
+    CAST(NULL AS date)                                           AS venc_ultimo,
+    CAST(NULL AS varchar)                                       AS usuario_fatura,
+    CAST(NULL AS varchar)                                       AS status_fatura,
+    CAST(NULL AS varchar)                                       AS fatura_cancelada_kmm,
+    CAST(NULL AS double)                                         AS valor_pago_receber,
+    CAST(NULL AS double)                                         AS valor_juro_receber,
+    CAST(NULL AS double)                                         AS valor_desconto_receber,
+    CAST(NULL AS double)                                         AS saldo_aberto_receber,
+    CAST(NULL AS varchar)                                       AS status_pagamento_receber,
+    CAST(NULL AS bigint)                                         AS dias_emissao_ate_faturamento,
+    CAST(NULL AS date)                                           AS data_emissao_fatura,
+    -- contrato de frete terceiro / KMM: MESMAS regras/filtros do cft_pagar_raw
+    -- ja usado nos outros blocos (cft_contrato_frete <> 3, serie
+    -- formulario ampliada p/ tipo 5). Nao alterei esses filtros aqui. So que usa
+    -- cft_pagar_por_car_codigo (escopado por car_codigo, nao por
+    -- car_codigo_carga_embarcador) -- se usasse o cft_pagar normal (por
+    -- embarcador), o contrato do car_codigo ATIVO irmao vazava pra essa linha
+    -- (caso real: car_codigo=271589 mostrava o contrato 200642 do irmao ativo
+    -- 302739 por engano). Com o escopo certo + tipo 5/serie 'EFRETEC' agora
+    -- incluidos no cft_pagar_raw, car_codigo=271589 mostra corretamente
+    -- contrato=191875 aqui (sem titulo/custo, pois esse contrato especifico
+    -- foi cancelado no KMM antes de gerar titulo -- ver 271589/191875).
+    cfp.contrato,
+    CASE WHEN cfp.contrato IS NULL THEN NULL
+         WHEN cfp.contrato_data_cancelamento_kmm IS NOT NULL THEN 'SIM'
+         ELSE 'NAO'
+    END                                                          AS contrato_cancelado_kmm,
+    CAST(NULL AS integer)                                       AS contrato_avulso,
+    cfp.valor_contrato_bruto,
+    cfp.valor_contrato_liquido,
+    cfp.num_titulo_pagar,
+    cfp.valor_titulo_pagar,
+    cfp.usuario_titulo_pagar,
+    CASE WHEN cfp.titulo_pagar_data_estorno IS NOT NULL THEN 'ESTORNADO'
+         WHEN cfp.num_titulo_pagar IS NOT NULL THEN 'FATURADO'
+         WHEN cfp.car_codigo_carga_embarcador IS NOT NULL THEN 'SEM FATURA PAGAR'
+         ELSE NULL
+    END                                                          AS status_fatura_pagar,
+    CASE WHEN cfp.contrato IS NULL                  THEN NULL
+         WHEN NOT cfp.teve_titulo_pagar_estornado   THEN 'NUNCA CANCELADA'
+         WHEN cfp.num_titulo_pagar IS NOT NULL
+              AND cfp.titulo_pagar_data_estorno IS NULL THEN 'CANCELADA E REEMITIDA'
+         ELSE 'CANCELADA SEM REEMISSAO'
+    END                                                          AS fatura_pagar_cancelada_kmm,
+    cfp.valor_pago_pagar,
+    cfp.valor_juro_pagar,
+    cfp.valor_desconto_pagar,
+    coc.custo_ocorrencia,
+    CASE WHEN cfp.num_titulo_pagar IS NULL THEN NULL
+         WHEN cfp.titulo_pagar_data_estorno IS NOT NULL THEN 'ESTORNADO'
+         WHEN COALESCE(cfp.valor_pago_pagar,0) <= 0.005 THEN 'EM ABERTO'
+         WHEN cfp.valor_pago_pagar >= (cfp.valor_titulo_pagar + COALESCE(cfp.valor_juro_pagar,0) - COALESCE(cfp.valor_desconto_pagar,0)) - 0.01 THEN 'QUITADO'
+         ELSE 'PAGAMENTO PARCIAL'
+    END                                                          AS status_pagamento_pagar,
+    cfp.data_ref_pagar,
+    CAST(NULL AS date)                                           AS data_ref_receber,
+    CAST(NULL AS bigint)                                         AS prazo_dias,
+    CAST(NULL AS varchar)                                       AS prazo_tipo,
+    CAST(NULL AS double)                                         AS margem_bruta,
+    CAST(NULL AS double)                                         AS margem_pct,
+    'NAO APLICAVEL - SEM DOCUMENTO'                             AS status_integracao,
+    -- REGRAS DE NEGOCIO -- sem documento/con_codigo, nao ha como saber o tipo
+    -- de cooperado (nao passa por fato_operacional/dim_cooperado aqui)
+    CAST(NULL AS varchar)                                       AS tipo_cooperado,
+    cfp.operador_contrato,
+    CAST(NULL AS varchar)                                       AS divergencia_negocio,
+    -- fallback de contas a receber -- nao se aplica: sem con_codigo/documento
+    -- nao ha CNPJ/data pra tentar o match por CNPJ+valor+data
+    CAST(NULL AS varchar)                                       AS num_fatura_estimada,
+    CAST(NULL AS double)                                         AS valor_fatura_estimada,
+    CAST(NULL AS bigint)                                         AS gap_dias_fatura_estimada,
+    CAST(NULL AS varchar)                                        AS usuario_doc_kmm,
+    CAST(NULL AS varchar)                                        AS tipo_operacao,
+    CAST(NULL AS varchar)                                        AS doc_anulacao,
+    CAST(NULL AS bigint)                                         AS con_anulacao_ref,
+    CAST(NULL AS double)                                         AS vlr_receita_bruta_multi,
+    CAST(NULL AS varchar)                                        AS no_painel,
+    CAST(NULL AS varchar)                                        AS motivo_fora_painel
+FROM carga_sem_documento cs
+LEFT JOIN ciot_por_car_codigo cpc ON cpc.car_codigo = cs.car_codigo
+LEFT JOIN cft_pagar_por_car_codigo cfp ON cfp.car_codigo = cs.car_codigo
+LEFT JOIN custo_ocorrencia_por_car_codigo coc ON coc.car_codigo = cs.car_codigo
+
+),
+
+-- ============================================================
+-- RESULTADO FINAL -- todos os documentos, com a flag status_integracao
+-- Valores possiveis:
+--   'INTEGRADO'                                  -> ok, achou o par no KMM e bate
+--   'NAO INTEGRADO'                               -> documento valido no Multi, sem par no KMM
+--   'NAO INTEGRADO - PESSOA SEM CADASTRO KMM'     -> (so no bloco OCORRENCIA) transportador nem existe na KMM
+--   'DIVERGENCIA - CANCELADO MULTI / VALIDO KMM'  -> cancelado num lado, ativo no outro
+--   'DIVERGENCIA - VALIDO MULTI / CANCELADO KMM'
+--   'DIVERGENCIA - CANCELADO NO KMM'              -> (so no bloco OCORRENCIA)
+--   'CANCELADO SEM KMM'                           -> cancelado no Multi e nunca existiu no KMM (nao e erro)
+--   'NAO APLICAVEL - CTE INUTILIZADO'              -> (so no bloco CT-e) con_status='I', numeracao anulada
+--                                                     no SEFAZ antes de autorizar -- nunca vira documento
+--                                                     fiscal valido, por definicao nunca tem par no KMM
+--   'NAO APLICAVEL - DOC NAO FISCAL'               -> (so no bloco NF) OST/DV/CV/ND, nao busca integracao
+--
+-- VIAGEM (lado Multi, prd_gold.fato_operacional -- so CT-e/NF; cooperado
+-- tambem aparece em OCORRENCIA, via kmm_kss_pessoa.razao_social):
+--   cooperado             -> nome do cooperado/transportador da viagem
+--   vei_placa              -> placa do veiculo
+--   inicio_da_prestacao / fim_da_prestacao -> origem/destino da viagem
+--   Em CT-e/NF, os 4 vem do mesmo pedido "ativo" escolhido em doc_multi (ver
+--   OBS acima) -- ~0,35% dos con_codigo tem cooperado/placa reais diferentes
+--   entre pedidos (troca de veiculo/motorista), inicio/fim nunca diverge.
+--   vei_placa/inicio/fim ficam NULL em OCORRENCIA (nao ha fato_operacional
+--   vinculado a um pagamento avulso).
+--
+-- dias_emissao_ate_faturamento -> date_diff em dias entre a emissao do documento (Multi)
+--   e a emissao do titulo mais antigo no contas a receber (KMM). NULL = sem fatura ainda.
+--   Gap muito grande (dezenas/centenas de dias) e sinal de match suspeito (documento
+--   errado casado por CNPJ+valor) OU atraso real de faturamento -- vale investigar.
+--
+-- Para ver so os problemas:      WHERE status_integracao NOT IN ('INTEGRADO','CANCELADO SEM KMM','NAO APLICAVEL - DOC NAO FISCAL')
+-- Para ver so os nao integrados: WHERE status_integracao IN ('NAO INTEGRADO','NAO INTEGRADO - PESSOA SEM CADASTRO KMM')
+-- Para ver so os integrados:     WHERE status_integracao = 'INTEGRADO'
+--
+-- FATURA DE CUSTO / MOVIMENTACAO (contas a pagar -- frete terceiro/contrato avulso):
+--   contrato             -> numero do contrato de frete terceiro no Multi (so CT-e/NF; NULL em OCORRENCIA)
+--   contrato_avulso      -> numero do pagamento avulso no Multi (so OCORRENCIA; NULL em CT-e/NF)
+--   num_titulo_pagar     -> numero do titulo gerado na KMM (kmm_finan_finan_contas_pagar.num_docto)
+--   status_fatura_pagar  -> 'FATURADO' | 'SEM FATURA PAGAR' (achou contrato mas nao gerou titulo)
+--                           | 'NAO APLICAVEL - DOCUMENTO CANCELADO' (so CT-e/NF; contrato/titulo sao
+--                             da CARGA, nao do documento -- se a carga tem 1 CT-e ativo e outros
+--                             cancelados/reemitidos, so o ativo mostra o contrato/titulo real;
+--                             os cancelados nao herdam a fatura do documento vivo)
+--                           | NULL (nem contrato tem)
+-- Para ver so quem esta sem fatura de custo: WHERE status_fatura_pagar = 'SEM FATURA PAGAR'
+--
+-- VALORES -- sempre origem KMM (o ERP, valor que sera contabilizado):
+--   valor_documento_kmm    -> CT-e: kc.total_conhecimento | NF: kn.calc_valor_total_nota | NULL em OCORRENCIA
+--   valor_icms_kmm         -> CT-e: kc.valor_icms | NF: kn.calc_valor_icms | NULL em OCORRENCIA
+--   valor_iss_kmm          -> CT-e: kc.valor_iss | NF: kn.serv_iss_valor | NULL em OCORRENCIA
+--   valor_fatura           -> soma das parcelas no contas a receber (cliente); ja existia
+--   valor_contrato_bruto   -> kmm_contrato_contrato_transp.valor_frete_bruto (contrato de frete
+--                             terceiro em CT-e/NF, contrato avulso serie 'P' em OCORRENCIA)
+--   valor_contrato_liquido -> mesma origem, valor_frete_liquido
+--   valor_titulo_pagar     -> kmm_finan_finan_contas_pagar.valor_docto (titulo a pagar ao transportador)
+--   Em CT-e/NF, valor_contrato_* e valor_titulo_pagar seguem a mesma regra do
+--   contrato/num_titulo_pagar: so aparecem no documento ATIVO da carga.
+--
+-- USUARIO DE INSERCAO (auditoria KMM):
+--   usuario_fatura       -> user_insert de quem criou o titulo no contas a receber
+--   usuario_titulo_pagar -> user_insert de quem criou o titulo no contas a pagar
+--   Um nome de PESSOA aqui (em vez de um usuario de sistema/integracao) e sinal de
+--   lancamento manual -- geralmente porque a integracao automatica falhou ou nao
+--   rodou pra aquele documento (foi o caso da carga 190415: fatura criada manualmente
+--   4 meses apos a emissao do CT-e -- dias_emissao_ate_faturamento nao era bug).
+--
+-- SITUACAO DE PAGAMENTO -- valor devido = valor do titulo + juro - desconto;
+--   comparado com o total efetivamente amortizado (pago), tanto do lado
+--   contas a receber (cliente) quanto contas a pagar (transportador):
+--   valor_pago_receber/valor_juro_receber/valor_desconto_receber -> soma das
+--     amortizacoes/juros/descontos nao estornados vinculados ao(s) titulo(s)
+--     de contas a receber do documento (kmm_finan_finan_contas_receber_amort/_juro/_desc)
+--   status_pagamento_receber -> 'QUITADO' | 'PAGAMENTO PARCIAL' | 'EM ABERTO' | NULL (sem fatura)
+--   valor_pago_pagar/valor_juro_pagar/valor_desconto_pagar -> mesma logica, lado
+--     contas a pagar (kmm_finan_finan_contas_pagar_amort/_juro/_desc)
+--   status_pagamento_pagar -> mesmos valores possiveis, NULL quando nao ha titulo a pagar
+--     (ou documento cancelado em CT-e/NF, mesma regra do status_fatura_pagar)
+--   Tolerancia de 1 centavo pra evitar falso "PAGAMENTO PARCIAL" por arredondamento.
+-- Para ver quem ta em aberto ou parcial (dos dois lados): WHERE status_pagamento_receber IN ('EM ABERTO','PAGAMENTO PARCIAL') OR status_pagamento_pagar IN ('EM ABERTO','PAGAMENTO PARCIAL')
+--
+-- PRAZO ENTRE PAGAR O CUSTO E RECEBER DO CLIENTE (so CT-e/NF; NULL em OCORRENCIA):
+--   data_ref_pagar    -> ultima amortizacao do titulo a pagar; se ainda nao foi
+--                        pago, usa o vencimento do titulo como estimativa
+--   data_ref_receber  -> a mais tardia entre as parcelas do contas a receber:
+--                        ultima amortizacao de cada parcela, ou o vencimento
+--                        da parcela se ela ainda nao foi paga
+--   prazo_dias        -> date_diff em dias: data_ref_receber - data_ref_pagar.
+--                        Negativo = recebeu do cliente ANTES de pagar o custo.
+--   prazo_tipo        -> 'REAL' quando os dois lados ja tem amortizacao de
+--                        verdade (nao e projecao) | 'ESTIMADO' quando pelo
+--                        menos um lado ainda usa vencimento (nao aconteceu
+--                        ainda) | NULL quando falta um dos dois lados
+--   Para prazo medio confiavel, filtre so prazo_tipo = 'REAL' -- misturar
+--   com 'ESTIMADO' mistura fato com projecao de vencimento.
+-- ============================================================
+-- ============================================================
+-- LINHA REPRESENTANTE DA CARGA (custo/margem)
+-- valor_titulo_pagar (contrato de frete terceiro) e custo_ocorrencia
+-- (pagamento avulso) sao valores DA CARGA, nao do documento -- ficam
+-- repetidos em CADA documento (CT-e/NF) daquela carga. Uma carga com
+-- N documentos ativos (comum: varias NF-e numa mesma carga) repete o
+-- MESMO custo em N linhas -- somar direto no BI infla o custo em Nx
+-- e derruba a margem artificialmente (caso real: car_codigo_carga_
+-- embarcador=213786, 121 documentos, custo repetido 121x).
+--
+-- linha_custo_carga = 'SIM' em EXATAMENTE 1 linha por
+-- car_codigo_carga_embarcador (a doc ATIVA -- con_status IN ('A','S') --
+-- que carrega o custo; prefere CT-e sobre NF, desempate por maior
+-- valor_fatura, depois con_codigo). OCORRENCIA e documentos nao-ativos
+-- sempre 'NAO'. FALLBACK: quando a carga nao tem NENHUM documento ativo
+-- (todos cancelados nos dois lados, ex: car_codigo_carga_embarcador=213207)
+-- mas o contrato continua valido (situacao_carga='ATIVA', ver fix do
+-- campo `contrato` acima), usa esse documento cancelado como carregador --
+-- senao a carga inteira ficava sem nenhuma linha marcada e o custo/contrato
+-- real (valido nos dois lados) sumia da agregacao. A view
+-- prd_gold.vw_conciliacao_rentabilidade ja aplica WHERE linha_custo_carga
+-- = 'SIM' antes de somar valor_titulo_pagar, custo_ocorrencia ou
+-- margem_bruta/margem_pct. Qualquer outro consumo direto desta tabela
+-- (BI, ad-hoc) deve fazer o mesmo filtro.
+-- ============================================================
+carga_tem_doc_ativo AS (
+    SELECT car_codigo_carga_embarcador,
+           MAX(CASE WHEN con_status IN ('A','S') THEN 1 ELSE 0 END) AS tem_ativo
+    FROM conciliacao
+    WHERE tipo_analise <> 'OCORRENCIA'
+    GROUP BY car_codigo_carga_embarcador
+),
+conciliacao_final AS (
+    SELECT c.*,
+        CASE WHEN c.tipo_analise <> 'OCORRENCIA'
+               AND (
+                     c.con_status IN ('A','S')
+                     OR (COALESCE(ca.tem_ativo,0) = 0 AND c.situacao_carga = 'ATIVA')
+                   )
+               -- particiona elegivel (doc ativo OU fallback, nao OCORRENCIA)
+               -- separado do resto -- senao um cancelado/OCORRENCIA que
+               -- ordene antes (ex.: valor_fatura maior) rouba o rn=1 e a
+               -- carga fica sem nenhuma linha marcada
+               AND ROW_NUMBER() OVER (
+                     PARTITION BY c.car_codigo_carga_embarcador,
+                                  (c.tipo_analise <> 'OCORRENCIA' AND (
+                                        c.con_status IN ('A','S')
+                                     OR (COALESCE(ca.tem_ativo,0) = 0 AND c.situacao_carga = 'ATIVA')
+                                  ))
+                     ORDER BY (CASE WHEN c.tipo_analise = 'CT-e' THEN 0 ELSE 1 END),
+                              COALESCE(c.valor_fatura, 0) DESC,
+                              c.con_codigo
+                   ) = 1
+             THEN 'SIM' ELSE 'NAO'
+        END AS linha_custo_carga
+    FROM conciliacao c
+    LEFT JOIN carga_tem_doc_ativo ca ON ca.car_codigo_carga_embarcador = c.car_codigo_carga_embarcador
+)
+SELECT *
+FROM conciliacao_final
+ORDER BY tipo_analise, status_integracao, data_emissao DESC

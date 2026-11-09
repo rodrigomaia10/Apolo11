@@ -1,0 +1,65 @@
+[
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_contab_plano_contas",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_contab_plano_contas.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_contab_origem",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_contab_origem.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_contab_agrupamento",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_contab_agrupamento.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_contab_lancamento",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_contab_lancamento.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_contab_lancamento_item",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_contab_lancamento_item.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_centro_custo",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_centro_custo.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_pessoa",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_pessoa.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_organograma",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_organograma.sql"
+  },
+  {
+    "bucket_silver": "cootravale-layer-silver-us",
+    "table": "kmm_fiscal_documento_contab",
+    "database": "silver",
+    "sql_bucket": "cootravale-glue",
+    "sql_path": "sqls/silver/{env}/silver_kmm_fiscal_documento_contab.sql"
+  }
+]

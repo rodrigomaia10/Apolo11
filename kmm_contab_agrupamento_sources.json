@@ -1,0 +1,17 @@
+[
+  {
+    "bucket_bronze": "cootravale-layer-bronze-us",
+    "schema": "contab",
+    "inc": 1,
+    "driver": "org.postgresql.Driver",
+    "table": "contabilizacao_agrupamento",
+    "database": "bronze",
+    "query": "SELECT * FROM {schema}.{table} WHERE \"DATALAKE_ID\" = '40' AND \"COD_GESTAO\" = 98212 AND \"DATA_LANCAMENTO\" >= '2026-01-01' AND \"DATE_UPDATE\" >= CAST('{max_date_brz}' AS timestamp) ",
+    "jdbc": "jdbc:postgresql://{SERVER}:{PORT}/{DATABASE}",
+    "system": "kmm",
+    "secret": "prod_postgres_kmn_old",
+    "column_inc": "DATE_UPDATE",
+    "pks": "AGRUPAMENTO_ID",
+    "dt_inicial": "2026-01-01 00:00:00.000"
+  }
+]

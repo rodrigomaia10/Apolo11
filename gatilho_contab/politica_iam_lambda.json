@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["glue:StartWorkflowRun", "glue:GetWorkflowRuns"],
+      "Resource": "arn:aws:glue:us-east-1:152774997921:workflow/wf_contab_prd"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["glue:GetJobRuns"],
+      "Resource": [
+        "arn:aws:glue:us-east-1:152774997921:job/jdbc_to_bronze",
+        "arn:aws:glue:us-east-1:152774997921:job/bronze_to_silver",
+        "arn:aws:glue:us-east-1:152774997921:job/silver_to_gold"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: pt-BR
+	dataAccessOptions
+		fastCombine
+		legacyRedirects
+		returnErrorValuesAsNull
+
+queryGroup 'Dimensoes - Excel'
+
+	annotation PBI_QueryGroupOrder = 1
+
+queryGroup 'Fact - consulta'
+
+	annotation PBI_QueryGroupOrder = 3
+
+queryGroup 'Fact - excel'
+
+	annotation PBI_QueryGroupOrder = 2
+
+queryGroup 'Tabelas - Excel'
+
+	annotation PBI_QueryGroupOrder = 3
+
+queryGroup Parametros
+
+	annotation PBI_QueryGroupOrder = 0
+
+annotation PBI_QueryOrder = ["f_lancamentos","d_calendario","d_calendario_p2","f_orcado","f_orcado (2)","d_diretoria","dPlanoContas","dPlanoGerencial","d_gerencial","d_FilialSetor","dTipoDoc1","Kpi_1","tb_conta_ajuste","tb_Menu","Gestor de Pacote","listaGestores","tb_versao_liberacao","d_email","dFilialSetor","dPlanoContas_gestor","d_setor_email","_Medidas","Analise_Mensal","d_tipoLanc2","dParaxFiliais","d_Filial","dicas","RangeStart","RangeEnd","DataCorte", "DataValidacao","ExcelDados2024","ExcelDados2025","Athena2026","ParamCorte"]
+
+annotation __PBI_TimeIntelligenceEnabled = 1
+
+annotation PBI_ProTooling = ["DevMode"]
+
+ref table f_lancamentos
+ref table DateTableTemplate_0b7f1e4e-9539-4d24-924c-0a13ca7c4fde
+ref table d_calendario
+ref table LocalDateTable_a5b650a5-73b7-4389-b7da-9084165c62f1
+ref table d_calendario_p2
+ref table LocalDateTable_a1f6abbc-fab5-4ddb-b1ca-9d38d6bb8690
+ref table d_diretoria
+ref table dPlanoContas
+ref table dPlanoGerencial
+ref table d_gerencial
+ref table _Medidas
+ref table DRE
+ref table f_orcado
+ref table Analise_Mensal
+ref table d_calendario_Unico
+ref table Kpi_1
+ref table d_FilialSetor
+ref table tb_conta_ajuste
+ref table 'f_orcado (2)'
+ref table LocalDateTable_ff93ab4c-d99c-479e-8b76-a635e6af4721
+ref table dTipoDoc1
+ref table 'Gestor de Pacote'
+ref table tb_Menu
+ref table listaGestores
+ref table tb_versao_liberacao
+ref table d_email
+ref table d_setor_email
+ref table dFilialSetor
+ref table dPlanoContas_gestor
+ref table d_tipoLanc2
+ref table dParaxFiliais
+ref table d_Filial
+ref table dicas
+ref table ParamCorte
+ref table LocalDateTable_8ba56259-6360-4a39-abdd-bd24948060ae
+
+ref role '_DRE E GESTORES_Email'
+ref role Contabilidade
+
+ref cultureInfo pt-BR
+ref cultureInfo en-US
+
