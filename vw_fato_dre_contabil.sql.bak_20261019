@@ -1,0 +1,36 @@
+-- =====================================================================
+-- hml_gold.vw_fato_dre_contabil -> DRE CONTABIL: resultado (contas de resultado, classificacao 3.* em diante) por
+--   mes do lancamento, conta, origem do lancamento e centro de custo, direto da contabilidade do KMM, SEM camada gerencial.
+-- Definida em 19/10/2026 para validar o valor base contra o DRE gerencial (INFORMACOES GERENCIAIS.pbip).
+-- Fonte: prd_bronze.kmm_listas_contab_lancamentos_incremental (log com ~37 versoes de cada item), deduplicada por
+--   contabilizacao_id (id estavel do item; a recontabilizacao do KMM gera outro num_lancamento com o mesmo id).
+-- Sinal: valor = creditos - debitos (receita positiva, custo/despesa negativo), igual ao VALOR do DRE.
+-- Lancamentos disponiveis a partir de 01/05/2026.
+-- =====================================================================
+CREATE OR REPLACE VIEW hml_gold.vw_fato_dre_contabil AS
+WITH d AS (
+    SELECT contabilizacao_id,
+           arbitrary(data_lancamento)   AS dt,
+           arbitrary(classificacao)     AS cl,
+           arbitrary(descricao)         AS ds,
+           arbitrary(origem_descricao)  AS o,
+           arbitrary(centro_custo)      AS cc,
+           arbitrary(valor_credito)     AS cr,
+           arbitrary(valor_debito)      AS db
+    FROM prd_bronze.kmm_listas_contab_lancamentos_incremental
+    WHERE classificacao >= '3'
+    GROUP BY contabilizacao_id
+)
+SELECT date_format(dt, '%Y-%m')                              AS mes_lancamento,
+       CAST(date_trunc('month', dt) AS date)                 AS data_mes,
+       cl                                                    AS classificacao,
+       CAST(regexp_replace(cl, '\.', '') AS bigint)          AS num_conta,
+       ds                                                    AS conta_descricao,
+       substr(cl, 1, 3)                                      AS nivel_1,
+       substr(cl, 1, 8)                                      AS nivel_2,
+       coalesce(nullif(o, ''), '(sem origem)')               AS origem,
+       cc                                                    AS centro_custo,
+       SUM(cr - db)                                          AS valor,
+       COUNT(*)                                              AS itens
+FROM d
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9

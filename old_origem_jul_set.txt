@@ -1,0 +1,53 @@
+mes | origem | valor_mi | itens
+2026-07 | Conhecimento de Transporte | 42.327 | 96301
+2026-07 | Taxa do Transportador | 3.083 | 4942
+2026-07 | Nota Fiscal de E/S | 1.439 | 988
+2026-07 | Contas a Pagar - Desconto | 0.328 | 834
+2026-07 | Contas a Receber - Amortização | 0.024 | 326
+2026-07 | Custos - Reclassificação Contábil | 0.0 | 838
+2026-07 | Contas a Receber | 0.0 | 2
+2026-07 | Contas a Receber - Juro | 0.0 | 1
+2026-07 | Adiantamento de Viagem - Prestação de contas | -0.021 | 179
+2026-07 | Contas a Pagar - Juro | -0.034 | 49
+2026-07 | Patrimônio - Depreciação | -0.056 | 850
+2026-07 | Contas a Pagar - Amortização | -0.345 | 243
+2026-07 | Contrato de Transporte - Item | -0.5 | 2548
+2026-07 | Contas a Receber - Desconto | -1.074 | 573
+2026-07 | Estoque Operacional | -1.73 | 1159
+2026-07 | Nota Fiscal de Terceiro | -3.509 | 1685
+2026-07 | Contrato de Transporte | -37.269 | 11943
+2026-08 | Conhecimento de Transporte | 42.017 | 90540
+2026-08 | Taxa do Transportador | 2.102 | 2819
+2026-08 | Nota Fiscal de E/S | 1.643 | 993
+2026-08 | Contas a Pagar - Desconto | 0.133 | 249
+2026-08 | Contas a Receber - Juro | 0.0 | 5
+2026-08 | Contas a Receber | 0.0 | 2
+2026-08 | Custos - Reclassificação Contábil | -0.0 | 474
+2026-08 | Contas a Pagar | -0.001 | 2
+2026-08 | Contas a Receber - Amortização | -0.002 | 256
+2026-08 | Contas a Pagar - Juro | -0.005 | 47
+2026-08 | Adiantamento de Viagem - Prestação de contas | -0.024 | 141
+2026-08 | Patrimônio - Depreciação | -0.056 | 850
+2026-08 | Contas a Pagar - Amortização | -0.4 | 257
+2026-08 | Contrato de Transporte - Item | -0.429 | 1946
+2026-08 | Contas a Receber - Desconto | -1.072 | 281
+2026-08 | Estoque Operacional | -1.731 | 1204
+2026-08 | Nota Fiscal de Terceiro | -2.275 | 1350
+2026-08 | Contrato de Transporte | -36.046 | 10918
+2026-09 | Conhecimento de Transporte | 41.55 | 92024
+2026-09 | Taxa do Transportador | 2.009 | 2421
+2026-09 | Nota Fiscal de E/S | 0.876 | 1066
+2026-09 | Contas a Receber - Amortização | 0.229 | 6576
+2026-09 | Contas a Pagar - Desconto | 0.085 | 149
+2026-09 | Contas a Receber - Juro | -0.0 | 29
+2026-09 | Contas a Receber | 0.0 | 2
+2026-09 | Custos - Reclassificação Contábil | 0.0 | 260
+2026-09 | Contas a Pagar - Juro | -0.009 | 42
+2026-09 | Adiantamento de Viagem - Prestação de contas | -0.033 | 248
+2026-09 | Patrimônio - Depreciação | -0.056 | 850
+2026-09 | Contrato de Transporte - Item | -0.434 | 1855
+2026-09 | Contas a Receber - Desconto | -0.451 | 228
+2026-09 | Contas a Pagar - Amortização | -0.464 | 305
+2026-09 | Estoque Operacional | -1.68 | 1219
+2026-09 | Nota Fiscal de Terceiro | -2.517 | 1401
+2026-09 | Contrato de Transporte | -37.101 | 11335

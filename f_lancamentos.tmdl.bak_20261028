@@ -1,0 +1,813 @@
+table f_lancamentos
+	lineageTag: 782d884d-e97b-44e0-9476-37ce9a378e46
+
+	refreshPolicy
+		policyType: basic
+		rollingWindowGranularity: year
+		rollingWindowPeriods: 3
+		incrementalGranularity: month
+		incrementalPeriods: 2
+		sourceExpression = ```
+			let
+			    // Janela da partição (atualização incremental): RangeStart <= data < RangeEnd. No Desktop os parâmetros cobrem todo o histórico.
+			    ini = Date.From(RangeStart),
+			    fim = Date.From(RangeEnd),
+			    NaJanela = (t as table, col as text) => Table.SelectRows(t, each let d = Record.Field(_, col) in d <> null and d >= ini and d < fim),
+			    // Cada fonte só é lida pelas partições do seu período: Excel 2024/2025 (arquivadas), Athena 2026+ (mês atual e anterior).
+			    NExcel = if fim > #date(2024, 1, 1) and ini < #date(2026, 1, 1) then {NaJanela(ExcelDados2024, "Data do lançamento"), NaJanela(ExcelDados2025, "Data do lançamento")} else {},
+			    NAthena = if fim > #date(2026, 1, 1) then {Athena2026} else {},
+			    Novos = NExcel & NAthena,
+			    Base = Table.Combine(Novos),
+			    // De-para do centro de custo KMM para o nome do gerencial (passos que antes ficavam na consulta Dados).
+			    #"Merged Queries" = Table.NestedJoin(Base, {"Centro custo"}, dParaxFiliais, {"CENTRO DE CUSTO KMM"}, "dParaxFiliais", JoinKind.LeftOuter),
+			    #"Expanded {0}" = Table.ExpandTableColumn(#"Merged Queries", "dParaxFiliais", {"CENTRO DE CUSTO"}, {"CENTRO DE CUSTO"}),
+			    #"Added Conditional Column" = Table.AddColumn(#"Expanded {0}", "Personalizar", each if [CENTRO DE CUSTO] = null then [Centro custo] else [CENTRO DE CUSTO]),
+			    #"Removed Columns Cc" = Table.RemoveColumns(#"Added Conditional Column",{"Centro custo", "CENTRO DE CUSTO"}),
+			    #"Renamed Columns Cc" = Table.RenameColumns(#"Removed Columns Cc",{{"Personalizar", "Centro custo"}}),
+			    #"Added Custom" = Table.AddColumn(#"Renamed Columns Cc", "N Doc Ajustado", each 
+			        if [Cód. Origem] = "CTRANSP" or [Cód. Origem] = "CTRANSP ITEM" then
+			            let
+			                splitHist = Text.Split([Histórico], "["),
+			                adjustedDoc = if List.Count(splitHist) > 1 then (let splitPart = Text.Split(splitHist{1}, "]") in if List.Count(splitPart) > 0 then splitPart{0} else null) else null
+			            in
+			                adjustedDoc
+			        else
+			            [#"Número do documento (Item)"]
+			    ),
+			    #"Tipo Linha" = Table.TransformColumnTypes(#"Added Custom",{{"Número da Linha", Int64.Type}}),
+			    #"Linhas Validas" = Table.SelectRows(#"Tipo Linha", each [Número da Linha] <> null and [Número da Linha] <> ""),
+			    // SINAL_LANCAMENTO e VALOR vinham da planilha antiga; aqui são recriadas vazias e preenchidas pela despivotagem de Débito/Crédito.
+			    #"Sinal Vazio" = Table.AddColumn(#"Linhas Validas", "SINAL_LANCAMENTO", each null, type text),
+			    #"Appended Query" = Table.AddColumn(#"Sinal Vazio", "VALOR", each null, type number),
+			    #"Renamed Columns" = Table.RenameColumns(#"Appended Query",{{"Data do lançamento", "DATDOC"}, {"Classificação", "NUM_CONTA"}, {"Cód. Centro Custo", "CENTRO_CUSTO_COD_RECEITA"}, {"Centro custo", "CENTRO_CUSTO_DESC_RECEITA"}, {"Nº Docto (Lançamento)", "NUMDOC"}, {"Descrição conta", "DESC_CONTA_5_GRAU"}, {"Histórico", "COMPLEMENTO"}, {"Participante", "GRUPO_PAG"}, {"Cód. Origem", "TIPDOC_LANCAMENTO"}}),
+			    #"Colunas Carga" = List.Accumulate({"Tipo documento carga", "Cargas operacionais", "Qtd cargas operacionais", "Status carga", "Grupo pessoas tratado"}, #"Renamed Columns", (t, c) => if Table.HasColumns(t, c) then t else Table.AddColumn(t, c, each null)),
+			    #"Multiplied Column" = Table.TransformColumns(#"Colunas Carga", {{"Débito (R$)", each _ * -1, type number}}),
+			    #"Unpivoted Columns" = Table.UnpivotOtherColumns(#"Multiplied Column", {"DATDOC", "NUM_CONTA", "SINAL_LANCAMENTO", "VALOR", "CENTRO_CUSTO_COD_RECEITA", "CENTRO_CUSTO_DESC_RECEITA", "NUMDOC", "DESC_CONTA_5_GRAU", "COMPLEMENTO", "GRUPO_PAG", "TIPDOC_LANCAMENTO", "Origem Descrição", "Número do documento (Item)", "Lote", "Cód. modelo", "Apelido conta", "Cód. Setor", "Setor", "Tipo do lançamento", "Unidade negócio", "Cód. unidade negócio", "Número da Linha", "ID Organizacional", "Departamento", "Código contábil", "Organizacional", "Permite editar", "Cód. Departamento", "Cód. Organizacional", "C.N.P.J./C.P.F. participante", "Inserido por", "Inserido em", "Atualizado por", "Atualizado em", "N Doc Ajustado", "Tipo documento carga", "Cargas operacionais", "Qtd cargas operacionais", "Status carga", "Grupo pessoas tratado"}, "Attribute", "Value"),
+			    #"Removed Columns" = Table.RemoveColumns(#"Unpivoted Columns",{"SINAL_LANCAMENTO", "VALOR"}),
+			    #"Tipo Alterado4" = Table.TransformColumnTypes(#"Removed Columns",{{"DATDOC", type date}}),
+			    #"Renamed Columns1" = Table.RenameColumns(#"Tipo Alterado4",{{"Attribute", "SINAL_LANCAMENTO"}}),
+			    #"Extracted First Characters" = Table.TransformColumns(#"Renamed Columns1", {{"SINAL_LANCAMENTO", each Text.Start(_, 1), type text}}),
+			    #"Renamed Columns2" = Table.RenameColumns(#"Extracted First Characters",{{"Value", "VALOR"}}),
+			    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns2",{{"DATDOC", type date}, {"VALOR", type number}}),
+			    #"Primeiros Caracteres Inseridos" = Table.AddColumn(#"Changed Type", "Primeiros caracteres", each Text.Start([NUM_CONTA], 8), type text),
+			    #"Tipo Alterado1" = Table.TransformColumnTypes(#"Primeiros Caracteres Inseridos",{{"NUM_CONTA", Int64.Type}}),
+			    #"Consultas Mescladas" = Table.NestedJoin(#"Tipo Alterado1", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido" = Table.ExpandTableColumn(#"Consultas Mescladas", "dPlanoContas", {"Deduzir da receita bruta"}, {"Deduzir da receita bruta"}),
+			    #"Consultas Mescladas1" = Table.NestedJoin(#"dPlanoContas Expandido", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido1" = Table.ExpandTableColumn(#"Consultas Mescladas1", "dPlanoContas", {"Receita Liq"}, {"Receita Liq"}),
+			    #"Consulta Acrescentada" = #"dPlanoContas Expandido1",
+			    #"Consultas Mescladas2" = Table.NestedJoin(#"Consulta Acrescentada", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido2" = Table.ExpandTableColumn(#"Consultas Mescladas2", "dPlanoContas", {"Margem Bruta"}, {"Margem Bruta"}),
+			    #"Consultas Mescladas3" = Table.NestedJoin(#"dPlanoContas Expandido2", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido3" = Table.ExpandTableColumn(#"Consultas Mescladas3", "dPlanoContas", {"Resultado"}, {"Resultado"}),
+			    #"Consultas Mescladas4" = Table.NestedJoin(#"dPlanoContas Expandido3", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido4" = Table.ExpandTableColumn(#"Consultas Mescladas4", "dPlanoContas", {"Sobra Gerencial"}, {"Sobra Gerencial"}),
+			    #"Consultas Mescladas5" = Table.NestedJoin(#"dPlanoContas Expandido4", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido5" = Table.ExpandTableColumn(#"Consultas Mescladas5", "dPlanoContas", {"Margem Operacional", "Margem Repasse"}, {"Margem Operacional", "Margem Repasse"}),
+			    #"Consultas Mescladas6" = Table.NestedJoin(#"dPlanoContas Expandido5", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+			    #"dPlanoContas Expandido6" = Table.ExpandTableColumn(#"Consultas Mescladas6", "dPlanoContas", {"Sobra Contábil"}, {"Sobra Contábil"}),
+			    #"Linhas Filtradas" = Table.SelectRows(#"dPlanoContas Expandido6", each not Text.StartsWith([COMPLEMENTO], "RNC")),
+			    #"Consulta Acrescentada1" = #"Linhas Filtradas",
+			    #"Tipo Alterado2" = Table.TransformColumnTypes(#"Consulta Acrescentada1",{{"DATDOC", type date}}),
+			    #"Valor Substituído" = Table.ReplaceValue(#"Tipo Alterado2",each [CENTRO_CUSTO_DESC_RECEITA],each if [CENTRO_CUSTO_DESC_RECEITA]="FEIRA DE SANTANA" then "FEIRA DE SANTANA - BA" else [CENTRO_CUSTO_DESC_RECEITA],Replacer.ReplaceValue,{"CENTRO_CUSTO_DESC_RECEITA"}),
+			    //#"Valor Substituído" = Table.ReplaceValue(#"Tipo Alterado2","FEIRA DE SANTANA","FEIRA DE SANTANA - BA",Replacer.ReplaceValue,{"CENTRO_CUSTO_DESC_RECEITA"}),
+			    #"Valor Substituído1" = Table.ReplaceValue(#"Valor Substituído","BELÉM-PA","BELEM - PA",Replacer.ReplaceValue,{"CENTRO_CUSTO_DESC_RECEITA"}),
+			    #"Valor Substituído2" = Table.ReplaceValue(#"Valor Substituído1","CORP - LOGISTICA","CORPORATIVO LOGISTICA",Replacer.ReplaceText,{"CENTRO_CUSTO_DESC_RECEITA"}),
+			    #"Appended Query1" = #"Valor Substituído2",
+			    #"Filtered Rows" = Table.SelectRows(#"Appended Query1", each ([SINAL_LANCAMENTO] <> "N")),
+			    #"Coluna Duplicada" = Table.DuplicateColumn(#"Filtered Rows", "C.N.P.J./C.P.F. participante", "C.N.P.J./C.P.F. participante - Copiar"),
+			    #"Coluna Duplicada1" = Table.DuplicateColumn(#"Coluna Duplicada", "N Doc Ajustado", "N Doc Ajustado - Copiar"),
+			    #"Valor Substituído3" = Table.ReplaceValue(#"Coluna Duplicada1",".","",Replacer.ReplaceText,{"C.N.P.J./C.P.F. participante - Copiar"}),
+			    #"Valor Substituído4" = Table.ReplaceValue(#"Valor Substituído3","-","",Replacer.ReplaceText,{"C.N.P.J./C.P.F. participante - Copiar"}),
+			    #"Valor Substituído5" = Table.ReplaceValue(#"Valor Substituído4","/","",Replacer.ReplaceText,{"C.N.P.J./C.P.F. participante - Copiar"}),
+			    #"Tipo Alterado" = Table.TransformColumnTypes(#"Valor Substituído5",{{"C.N.P.J./C.P.F. participante - Copiar", Int64.Type}}),
+			    #"Tipo Alterado3" = Table.TransformColumnTypes(#"Tipo Alterado",{{"C.N.P.J./C.P.F. participante - Copiar", type text}}),
+			    #"Colunas Mescladas" = Table.CombineColumns(#"Tipo Alterado3",{"C.N.P.J./C.P.F. participante - Copiar", "N Doc Ajustado - Copiar"},Combiner.CombineTextByDelimiter("-", QuoteStyle.None),"chaveDre"),
+			    #"Personalização Adicionada" = Table.AddColumn(#"Colunas Mescladas", "Personalizar", each if [DATDOC] > #date(2025, 6, 1) and 
+			   List.Contains(
+			       {
+			        "3110200009",
+			        "3110200014",
+			        "3120500005",
+			        "3120500006",
+			        "3120500027",
+			        "3120500028"
+			       }, 
+			       [NUN_CONTA]
+			   )
+			then null else [Receita Liq]),
+			    #"Colunas Renomeadas" = Table.RenameColumns(#"Personalização Adicionada",{{"Receita Liq", "Receita Liq_old"}, {"Personalizar", "Receita Liq"}}),
+			    // Colunas que só existiam nas fontes legadas ficam nulas, para o modelo continuar carregando.
+			    Esperadas = {"TIPO", "VERSAO", "ATIVO", "COD_TRANSP", "Primeiros caracteres", "Deduzir da receita bruta", "Receita Liq_old", "Margem Bruta", "Resultado", "Sobra Gerencial", "Margem Operacional", "Margem Repasse", "Sobra Contábil", "ANO_REF", "MES_REF", "CENTRO_CUSTO_COD", "CENTRO_CUSTO_DESC", "CENTRO_GASTO_COD", "CENTRO_GASTO_DESC", "TIPO_DOC", "SERIE_DOC", "COD_GRUPO_PAG", "CONTRATO_VINCULO", "DATDOC", "NUM_CONTA", "SINAL_LANCAMENTO", "VALOR", "CENTRO_CUSTO_COD_RECEITA", "CENTRO_CUSTO_DESC_RECEITA", "DESC_CONTA_5_GRAU", "COMPLEMENTO", "GRUPO_PAG", "TIPDOC_LANCAMENTO", "Origem Descrição", "Número do documento (Item)", "Lote", "Cód. modelo", "Apelido conta", "Cód. Setor", "NUMDOC", "Setor", "Tipo do lançamento", "Unidade negócio", "Cód. unidade negócio", "Número da Linha", "ID Organizacional", "Departamento", "Código contábil", "Organizacional", "Permite editar", "Cód. Departamento", "Cód. Organizacional", "C.N.P.J./C.P.F. participante", "Inserido por", "Inserido em", "Atualizado por", "Atualizado em", "N Doc Ajustado", "chaveDre", "Receita Liq"},
+			    Faltantes = List.Difference(Esperadas, Table.ColumnNames(#"Colunas Renomeadas")),
+			    Completa = List.Accumulate(Faltantes, #"Colunas Renomeadas", (t, c) => Table.AddColumn(t, c, each null)),
+			    // Filtro exigido pela atualização incremental (RangeStart/RangeEnd sobre a coluna de data).
+			    Janela = Table.SelectRows(Completa, each [DATDOC] <> null and [DATDOC] >= ini and [DATDOC] < fim)
+			in
+			    Janela
+			```
+
+	column TIPO
+		dataType: string
+		lineageTag: 2b8377c3-836f-4db0-b623-649475c71b0f
+		summarizeBy: none
+		sourceColumn: TIPO
+
+		annotation SummarizationSetBy = Automatic
+
+	column VERSAO
+		dataType: string
+		lineageTag: 811a5616-b9c2-4c33-b7a5-ddb7dad09010
+		summarizeBy: none
+		sourceColumn: VERSAO
+
+		annotation SummarizationSetBy = Automatic
+
+	column ATIVO
+		dataType: string
+		lineageTag: 5f925308-1e7f-47c1-b210-4bba95f2fcdd
+		summarizeBy: none
+		sourceColumn: ATIVO
+
+		annotation SummarizationSetBy = Automatic
+
+	column COD_TRANSP
+		dataType: string
+		lineageTag: 3861cd21-847f-47ed-9c49-27fa5d134f02
+		summarizeBy: none
+		sourceColumn: COD_TRANSP
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Primeiros caracteres'
+		dataType: string
+		lineageTag: 1684f6c6-4187-4a41-88cc-1868bb448edf
+		summarizeBy: none
+		sourceColumn: Primeiros caracteres
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Deduzir da receita bruta'
+		dataType: string
+		lineageTag: 92f89f85-8b7f-48f8-9cea-6f3ce27acb62
+		summarizeBy: none
+		sourceColumn: Deduzir da receita bruta
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Receita Liq_old'
+		dataType: string
+		lineageTag: 8ae79228-2d16-4648-a7fb-a9e8f6e5448a
+		summarizeBy: none
+		sourceColumn: Receita Liq_old
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Margem Bruta'
+		dataType: string
+		lineageTag: 75d7a0bf-2d02-46f2-b757-8cd734c4b5c1
+		summarizeBy: none
+		sourceColumn: Margem Bruta
+
+		annotation SummarizationSetBy = Automatic
+
+	column Resultado
+		dataType: string
+		lineageTag: 8cd8a14a-22db-4cea-b06f-a289570bb98e
+		summarizeBy: none
+		sourceColumn: Resultado
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Sobra Gerencial'
+		dataType: string
+		lineageTag: 1da5b4d7-ec30-4d2b-8d91-d5ee178de1f5
+		summarizeBy: none
+		sourceColumn: Sobra Gerencial
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Margem Operacional'
+		dataType: string
+		lineageTag: d9e89be2-b264-45f1-97a0-bdb481fb32e8
+		summarizeBy: none
+		sourceColumn: Margem Operacional
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Margem Repasse'
+		dataType: string
+		lineageTag: 9b8e0eaa-815e-449f-a02d-db4c6899279b
+		summarizeBy: none
+		sourceColumn: Margem Repasse
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Sobra Contábil'
+		dataType: string
+		lineageTag: dbbb7df8-72ba-4a80-b6a4-8344aeb28e93
+		summarizeBy: none
+		sourceColumn: Sobra Contábil
+
+		annotation SummarizationSetBy = Automatic
+
+	column ANO_REF
+		dataType: string
+		lineageTag: dd484048-b19b-4091-b30a-ac611cf8efa9
+		summarizeBy: none
+		sourceColumn: ANO_REF
+
+		annotation SummarizationSetBy = Automatic
+
+	column MES_REF
+		dataType: string
+		lineageTag: 0538f353-46f9-4226-9d22-2cb79ac9c1e2
+		summarizeBy: none
+		sourceColumn: MES_REF
+
+		annotation SummarizationSetBy = Automatic
+
+	column CENTRO_CUSTO_COD
+		dataType: string
+		lineageTag: d3408a08-eb00-4415-97d9-c3c521e5e104
+		summarizeBy: none
+		sourceColumn: CENTRO_CUSTO_COD
+
+		annotation SummarizationSetBy = Automatic
+
+	column CENTRO_CUSTO_DESC
+		dataType: string
+		lineageTag: 602b6440-18ec-44f4-9dff-acefad6d1d4a
+		summarizeBy: none
+		sourceColumn: CENTRO_CUSTO_DESC
+
+		annotation SummarizationSetBy = Automatic
+
+	column CENTRO_GASTO_COD
+		dataType: string
+		lineageTag: 836a5cd7-373d-4f86-afc6-b5eb9951d6e8
+		summarizeBy: none
+		sourceColumn: CENTRO_GASTO_COD
+
+		annotation SummarizationSetBy = Automatic
+
+	column CENTRO_GASTO_DESC
+		dataType: string
+		lineageTag: 033f3a9a-142e-4607-a226-ac04e0852081
+		summarizeBy: none
+		sourceColumn: CENTRO_GASTO_DESC
+
+		annotation SummarizationSetBy = Automatic
+
+	column TIPO_DOC
+		dataType: string
+		lineageTag: 1f148ab7-4b63-46fb-943d-8e480e40eee6
+		summarizeBy: none
+		sourceColumn: TIPO_DOC
+
+		annotation SummarizationSetBy = Automatic
+
+	column SERIE_DOC
+		dataType: string
+		lineageTag: aad1dc91-1d02-4ab3-8685-3412f68c7ced
+		summarizeBy: none
+		sourceColumn: SERIE_DOC
+
+		annotation SummarizationSetBy = Automatic
+
+	column COD_GRUPO_PAG
+		dataType: string
+		lineageTag: a6a1870f-1478-4927-a0fa-1d9a9318f885
+		summarizeBy: none
+		sourceColumn: COD_GRUPO_PAG
+
+		annotation SummarizationSetBy = Automatic
+
+	column CONTRATO_VINCULO
+		dataType: string
+		lineageTag: 22dc583b-7587-4d3d-a1da-9fc1887fd396
+		summarizeBy: none
+		sourceColumn: CONTRATO_VINCULO
+
+		annotation SummarizationSetBy = Automatic
+
+	column DATDOC
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 5c5e9f2b-7c11-4a4e-812e-04aa6abf8a96
+		summarizeBy: none
+		sourceColumn: DATDOC
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column NUM_CONTA
+		dataType: int64
+		formatString: 0
+		lineageTag: 1be21233-2db9-47aa-bb6e-206b8db73add
+		summarizeBy: sum
+		sourceColumn: NUM_CONTA
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isDecimal":true}
+
+	column SINAL_LANCAMENTO
+		dataType: string
+		lineageTag: 77411e93-f89b-4b8b-913b-6f07fbad6fca
+		summarizeBy: none
+		sourceColumn: SINAL_LANCAMENTO
+
+		annotation SummarizationSetBy = Automatic
+
+	column VALOR
+		dataType: double
+		lineageTag: 8643e8b9-a255-4be2-bbba-2db047a48ff9
+		summarizeBy: sum
+		sourceColumn: VALOR
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column CENTRO_CUSTO_COD_RECEITA
+		dataType: string
+		lineageTag: 2d2c77ab-0e55-432f-a653-76a94cba9fe7
+		summarizeBy: none
+		sourceColumn: CENTRO_CUSTO_COD_RECEITA
+
+		annotation SummarizationSetBy = Automatic
+
+	column CENTRO_CUSTO_DESC_RECEITA
+		dataType: string
+		lineageTag: 011bbde1-8fbe-4e69-a6c0-3a7b02734ee4
+		summarizeBy: none
+		sourceColumn: CENTRO_CUSTO_DESC_RECEITA
+
+		annotation SummarizationSetBy = Automatic
+
+	column DESC_CONTA_5_GRAU
+		dataType: string
+		lineageTag: b80aa099-5a1f-4b90-a55c-4ce306d238d0
+		summarizeBy: none
+		sourceColumn: DESC_CONTA_5_GRAU
+
+		annotation SummarizationSetBy = Automatic
+
+	column COMPLEMENTO
+		dataType: string
+		lineageTag: c77bd892-df7f-4506-8e55-a771f3caed88
+		summarizeBy: none
+		sourceColumn: COMPLEMENTO
+
+		annotation SummarizationSetBy = Automatic
+
+	column GRUPO_PAG
+		dataType: string
+		lineageTag: e2c26e6c-e76d-42f6-8955-eeaf00baeb90
+		summarizeBy: none
+		sourceColumn: GRUPO_PAG
+
+		annotation SummarizationSetBy = Automatic
+
+	column TIPDOC_LANCAMENTO
+		dataType: string
+		lineageTag: c6618a7b-a193-4bdc-9343-d02696d21ac4
+		summarizeBy: none
+		sourceColumn: TIPDOC_LANCAMENTO
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origem Descrição'
+		dataType: string
+		lineageTag: e0505fb6-1a8a-4375-9c84-5652afcd4f40
+		summarizeBy: none
+		sourceColumn: Origem Descrição
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Número do documento (Item)'
+		dataType: string
+		lineageTag: 4f0bd076-d162-4686-a12b-a2929dd03d27
+		summarizeBy: none
+		sourceColumn: Número do documento (Item)
+
+		annotation SummarizationSetBy = Automatic
+
+	column Lote
+		dataType: string
+		lineageTag: 6945d31c-fe3b-436f-bfc1-9a36e79d46b1
+		summarizeBy: none
+		sourceColumn: Lote
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cód. modelo'
+		dataType: string
+		lineageTag: 58d41749-f11d-48dd-835b-5ba0286dcad3
+		summarizeBy: none
+		sourceColumn: Cód. modelo
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Apelido conta'
+		dataType: string
+		lineageTag: 401d5539-94f5-49c6-a318-cb4fdb48e44a
+		summarizeBy: none
+		sourceColumn: Apelido conta
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cód. Setor'
+		dataType: string
+		lineageTag: eba6726c-75fa-4bd8-b1fb-dc4874521f53
+		summarizeBy: none
+		sourceColumn: Cód. Setor
+
+		annotation SummarizationSetBy = Automatic
+
+	column NUMDOC
+		dataType: string
+		lineageTag: 6e5c592e-0afb-4fc2-aae7-4b79f0d10d24
+		summarizeBy: none
+		sourceColumn: NUMDOC
+
+		annotation SummarizationSetBy = Automatic
+
+	column Setor
+		dataType: string
+		lineageTag: 99a162fa-6213-4378-b70c-e1b81ed467b8
+		summarizeBy: none
+		sourceColumn: Setor
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Tipo do lançamento'
+		dataType: int64
+		formatString: 0
+		lineageTag: af6ed586-2562-4290-bc1d-f3e18c52c251
+		summarizeBy: sum
+		sourceColumn: Tipo do lançamento
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Unidade negócio'
+		dataType: string
+		lineageTag: 4eb7e22a-1cc0-43e9-b061-1716308c2d54
+		summarizeBy: none
+		sourceColumn: Unidade negócio
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cód. unidade negócio'
+		dataType: string
+		lineageTag: a5b6f8ad-15ff-4fcd-95bc-07a8ccda84f0
+		summarizeBy: none
+		sourceColumn: Cód. unidade negócio
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Número da Linha'
+		dataType: int64
+		formatString: 0
+		lineageTag: 0f9fc06d-b517-4a2f-8f27-18a22a9e11ee
+		summarizeBy: sum
+		sourceColumn: Número da Linha
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ID Organizacional'
+		dataType: string
+		lineageTag: f65e1b79-c1f8-481f-87ac-00ca1965bae7
+		summarizeBy: none
+		sourceColumn: ID Organizacional
+
+		annotation SummarizationSetBy = Automatic
+
+	column Departamento
+		dataType: string
+		lineageTag: e12b07c8-c371-40a1-ab9b-8e6ee0aea361
+		summarizeBy: none
+		sourceColumn: Departamento
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Código contábil'
+		dataType: string
+		lineageTag: cf1a35ef-cd4b-4c05-b63b-06813029dfaa
+		summarizeBy: none
+		sourceColumn: Código contábil
+
+		annotation SummarizationSetBy = Automatic
+
+	column Organizacional
+		dataType: string
+		lineageTag: 2c037f82-e0cd-4cab-8300-c7fd176f531d
+		summarizeBy: none
+		sourceColumn: Organizacional
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Permite editar'
+		dataType: string
+		lineageTag: 938ecd4e-67a3-428a-a5d6-b2a2a6b6eddb
+		summarizeBy: none
+		sourceColumn: Permite editar
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cód. Departamento'
+		dataType: string
+		lineageTag: 7890c1a3-6112-4a66-b29d-d122282eedb4
+		summarizeBy: none
+		sourceColumn: Cód. Departamento
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cód. Organizacional'
+		dataType: string
+		lineageTag: df009c5b-0333-40e6-b821-265bee006ef4
+		summarizeBy: none
+		sourceColumn: Cód. Organizacional
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'C.N.P.J./C.P.F. participante'
+		dataType: string
+		lineageTag: 7bb08608-3f34-4e8b-a27c-71e49922c940
+		summarizeBy: none
+		sourceColumn: C.N.P.J./C.P.F. participante
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Inserido por'
+		dataType: string
+		lineageTag: 5b6b13a9-fb39-460f-949d-6fafc1ec1248
+		summarizeBy: none
+		sourceColumn: Inserido por
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Inserido em'
+		dataType: string
+		lineageTag: 06227bf5-5c42-42f8-b51d-5089604cd1fb
+		summarizeBy: none
+		sourceColumn: Inserido em
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Atualizado por'
+		dataType: string
+		lineageTag: 38785a0f-3b81-47a6-9902-266047e76a15
+		summarizeBy: none
+		sourceColumn: Atualizado por
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Atualizado em'
+		dataType: string
+		lineageTag: e944173b-dae1-4646-ba9f-f03f192e20b4
+		summarizeBy: none
+		sourceColumn: Atualizado em
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'N Doc Ajustado'
+		dataType: string
+		lineageTag: 16c0e0ee-922e-4e21-9eb5-756e471e8829
+		summarizeBy: none
+		sourceColumn: N Doc Ajustado
+
+		annotation SummarizationSetBy = Automatic
+
+	column N_Doc_Ajustado_2 = ```
+			
+			VAR NumeroDoc = TRIM([Número do documento (Item)])
+			VAR NDocAjustado = TRIM([N Doc Ajustado])
+			
+			RETURN 
+			    IF(
+			        ISBLANK(NumeroDoc) && ISBLANK(NDocAjustado),
+			        BLANK(),
+			        IF(
+			            NumeroDoc = "" && NDocAjustado = "",
+			            BLANK(),
+			            IF(
+			                NumeroDoc = NDocAjustado,
+			                NDocAjustado,
+			                IF(
+			                    ISBLANK(NDocAjustado) || NDocAjustado = "",
+			                    NumeroDoc,
+			                    NDocAjustado
+			                )
+			            )
+			        )
+			    )
+			
+			```
+		lineageTag: 87c5c934-35f7-4bf7-a226-85d20a4d47f8
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column chaveDre
+		dataType: string
+		lineageTag: a03c1e34-458e-431e-8b15-aa48457bb482
+		summarizeBy: none
+		sourceColumn: chaveDre
+
+		annotation SummarizationSetBy = Automatic
+
+	column chaveDre_concat =
+			
+			CONCATENATE(
+			CONCATENATE(f_lancamentos[CNPJ_FILIAL],CONCATENATE( "-"  , f_lancamentos[chaveDre])),
+			f_lancamentos[TIPO_CARGAS])
+		lineageTag: 2dcbf399-31e9-4f70-9ea0-de32bd8e6a37
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column CNPJ_FILIAL = IF(f_lancamentos[TIPDOC_LANCAMENTO] IN {"CTE", "NFES", "CTRANSP ITEM", "CTRANSP"},  RELATED(d_Filial[CNPJ_CPF]), "-")
+		lineageTag: bcd34252-7229-4c85-9ffd-42a4c7a8d0e9
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column CARGAS = IF(ISBLANK(f_lancamentos[Cargas operacionais]), "-", f_lancamentos[Cargas operacionais])
+		lineageTag: 0849dd8f-9919-4db4-bc1b-c11f4a706f0e
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column TIPO_CARGAS =
+			
+			SWITCH(
+			    RELATED(d_tipoLanc2[TIPDOC_LANCAMENTO]),
+			    "CTE", "-CTE",
+			    "NFES", "-NFES",
+			    "CTRANSP ITEM", "-CTF",
+			    "CTRANSP", "-CTF",
+			    "-"  // Default case
+			)
+		lineageTag: ff423111-7e6d-48f2-a779-f5059e3d8502
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Receita Liq'
+		dataType: string
+		lineageTag: 5633b385-9519-421e-9f86-eb962dfbb6ec
+		summarizeBy: none
+		sourceColumn: Receita Liq
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Tipo documento carga'
+		dataType: string
+		lineageTag: 184a0951-8d4f-4b9d-aad3-a10e775462be
+		summarizeBy: none
+		sourceColumn: Tipo documento carga
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cargas operacionais'
+		dataType: string
+		lineageTag: 8979cfba-6807-4c7c-8b5e-b4446ae1758c
+		summarizeBy: none
+		sourceColumn: Cargas operacionais
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Qtd cargas operacionais'
+		dataType: int64
+		lineageTag: 5b8793cb-cc7e-40d0-90f8-3d75ba639973
+		summarizeBy: none
+		sourceColumn: Qtd cargas operacionais
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Status carga'
+		dataType: string
+		lineageTag: fe1b7a93-a1bf-453e-be46-b2adda9b2c62
+		summarizeBy: none
+		sourceColumn: Status carga
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Grupo pessoas tratado'
+		dataType: string
+		lineageTag: da48f295-5de8-4fad-8061-4085df039249
+		summarizeBy: none
+		sourceColumn: Grupo pessoas tratado
+
+		annotation SummarizationSetBy = Automatic
+
+	partition f_lancamentos-04e5b84e-0114-48d8-b90e-981bd1aeadb9 = m
+		mode: import
+		queryGroup: 'Fact - consulta'
+		source = ```
+				let
+				    // Janela da partição (atualização incremental): RangeStart <= data < RangeEnd. No Desktop os parâmetros cobrem todo o histórico.
+				    ini = Date.From(RangeStart),
+				    fim = Date.From(RangeEnd),
+				    NaJanela = (t as table, col as text) => Table.SelectRows(t, each let d = Record.Field(_, col) in d <> null and d >= ini and d < fim),
+				    // Cada fonte só é lida pelas partições do seu período: Excel 2024/2025 (arquivadas), Athena 2026+ (mês atual e anterior).
+				    NExcel = if fim > #date(2024, 1, 1) and ini < #date(2026, 1, 1) then {NaJanela(ExcelDados2024, "Data do lançamento"), NaJanela(ExcelDados2025, "Data do lançamento")} else {},
+				    NAthena = if fim > #date(2026, 1, 1) then {Athena2026} else {},
+				    Novos = NExcel & NAthena,
+				    Base = Table.Combine(Novos),
+				    // De-para do centro de custo KMM para o nome do gerencial (passos que antes ficavam na consulta Dados).
+				    #"Merged Queries" = Table.NestedJoin(Base, {"Centro custo"}, dParaxFiliais, {"CENTRO DE CUSTO KMM"}, "dParaxFiliais", JoinKind.LeftOuter),
+				    #"Expanded {0}" = Table.ExpandTableColumn(#"Merged Queries", "dParaxFiliais", {"CENTRO DE CUSTO"}, {"CENTRO DE CUSTO"}),
+				    #"Added Conditional Column" = Table.AddColumn(#"Expanded {0}", "Personalizar", each if [CENTRO DE CUSTO] = null then [Centro custo] else [CENTRO DE CUSTO]),
+				    #"Removed Columns Cc" = Table.RemoveColumns(#"Added Conditional Column",{"Centro custo", "CENTRO DE CUSTO"}),
+				    #"Renamed Columns Cc" = Table.RenameColumns(#"Removed Columns Cc",{{"Personalizar", "Centro custo"}}),
+				    #"Added Custom" = Table.AddColumn(#"Renamed Columns Cc", "N Doc Ajustado", each 
+				        if [Cód. Origem] = "CTRANSP" or [Cód. Origem] = "CTRANSP ITEM" then
+				            let
+				                splitHist = Text.Split([Histórico], "["),
+				                adjustedDoc = if List.Count(splitHist) > 1 then (let splitPart = Text.Split(splitHist{1}, "]") in if List.Count(splitPart) > 0 then splitPart{0} else null) else null
+				            in
+				                adjustedDoc
+				        else
+				            [#"Número do documento (Item)"]
+				    ),
+				    #"Tipo Linha" = Table.TransformColumnTypes(#"Added Custom",{{"Número da Linha", Int64.Type}}),
+				    #"Linhas Validas" = Table.SelectRows(#"Tipo Linha", each [Número da Linha] <> null and [Número da Linha] <> ""),
+				    // SINAL_LANCAMENTO e VALOR vinham da planilha antiga; aqui são recriadas vazias e preenchidas pela despivotagem de Débito/Crédito.
+				    #"Sinal Vazio" = Table.AddColumn(#"Linhas Validas", "SINAL_LANCAMENTO", each null, type text),
+				    #"Appended Query" = Table.AddColumn(#"Sinal Vazio", "VALOR", each null, type number),
+				    #"Renamed Columns" = Table.RenameColumns(#"Appended Query",{{"Data do lançamento", "DATDOC"}, {"Classificação", "NUM_CONTA"}, {"Cód. Centro Custo", "CENTRO_CUSTO_COD_RECEITA"}, {"Centro custo", "CENTRO_CUSTO_DESC_RECEITA"}, {"Nº Docto (Lançamento)", "NUMDOC"}, {"Descrição conta", "DESC_CONTA_5_GRAU"}, {"Histórico", "COMPLEMENTO"}, {"Participante", "GRUPO_PAG"}, {"Cód. Origem", "TIPDOC_LANCAMENTO"}}),
+				    #"Colunas Carga" = List.Accumulate({"Tipo documento carga", "Cargas operacionais", "Qtd cargas operacionais", "Status carga", "Grupo pessoas tratado"}, #"Renamed Columns", (t, c) => if Table.HasColumns(t, c) then t else Table.AddColumn(t, c, each null)),
+				    #"Multiplied Column" = Table.TransformColumns(#"Colunas Carga", {{"Débito (R$)", each _ * -1, type number}}),
+				    #"Unpivoted Columns" = Table.UnpivotOtherColumns(#"Multiplied Column", {"DATDOC", "NUM_CONTA", "SINAL_LANCAMENTO", "VALOR", "CENTRO_CUSTO_COD_RECEITA", "CENTRO_CUSTO_DESC_RECEITA", "NUMDOC", "DESC_CONTA_5_GRAU", "COMPLEMENTO", "GRUPO_PAG", "TIPDOC_LANCAMENTO", "Origem Descrição", "Número do documento (Item)", "Lote", "Cód. modelo", "Apelido conta", "Cód. Setor", "Setor", "Tipo do lançamento", "Unidade negócio", "Cód. unidade negócio", "Número da Linha", "ID Organizacional", "Departamento", "Código contábil", "Organizacional", "Permite editar", "Cód. Departamento", "Cód. Organizacional", "C.N.P.J./C.P.F. participante", "Inserido por", "Inserido em", "Atualizado por", "Atualizado em", "N Doc Ajustado", "Tipo documento carga", "Cargas operacionais", "Qtd cargas operacionais", "Status carga", "Grupo pessoas tratado"}, "Attribute", "Value"),
+				    #"Removed Columns" = Table.RemoveColumns(#"Unpivoted Columns",{"SINAL_LANCAMENTO", "VALOR"}),
+				    #"Tipo Alterado4" = Table.TransformColumnTypes(#"Removed Columns",{{"DATDOC", type date}}),
+				    #"Renamed Columns1" = Table.RenameColumns(#"Tipo Alterado4",{{"Attribute", "SINAL_LANCAMENTO"}}),
+				    #"Extracted First Characters" = Table.TransformColumns(#"Renamed Columns1", {{"SINAL_LANCAMENTO", each Text.Start(_, 1), type text}}),
+				    #"Renamed Columns2" = Table.RenameColumns(#"Extracted First Characters",{{"Value", "VALOR"}}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Renamed Columns2",{{"DATDOC", type date}, {"VALOR", type number}}),
+				    #"Primeiros Caracteres Inseridos" = Table.AddColumn(#"Changed Type", "Primeiros caracteres", each Text.Start([NUM_CONTA], 8), type text),
+				    #"Tipo Alterado1" = Table.TransformColumnTypes(#"Primeiros Caracteres Inseridos",{{"NUM_CONTA", Int64.Type}}),
+				    #"Consultas Mescladas" = Table.NestedJoin(#"Tipo Alterado1", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido" = Table.ExpandTableColumn(#"Consultas Mescladas", "dPlanoContas", {"Deduzir da receita bruta"}, {"Deduzir da receita bruta"}),
+				    #"Consultas Mescladas1" = Table.NestedJoin(#"dPlanoContas Expandido", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido1" = Table.ExpandTableColumn(#"Consultas Mescladas1", "dPlanoContas", {"Receita Liq"}, {"Receita Liq"}),
+				    #"Consulta Acrescentada" = #"dPlanoContas Expandido1",
+				    #"Consultas Mescladas2" = Table.NestedJoin(#"Consulta Acrescentada", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido2" = Table.ExpandTableColumn(#"Consultas Mescladas2", "dPlanoContas", {"Margem Bruta"}, {"Margem Bruta"}),
+				    #"Consultas Mescladas3" = Table.NestedJoin(#"dPlanoContas Expandido2", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido3" = Table.ExpandTableColumn(#"Consultas Mescladas3", "dPlanoContas", {"Resultado"}, {"Resultado"}),
+				    #"Consultas Mescladas4" = Table.NestedJoin(#"dPlanoContas Expandido3", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido4" = Table.ExpandTableColumn(#"Consultas Mescladas4", "dPlanoContas", {"Sobra Gerencial"}, {"Sobra Gerencial"}),
+				    #"Consultas Mescladas5" = Table.NestedJoin(#"dPlanoContas Expandido4", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido5" = Table.ExpandTableColumn(#"Consultas Mescladas5", "dPlanoContas", {"Margem Operacional", "Margem Repasse"}, {"Margem Operacional", "Margem Repasse"}),
+				    #"Consultas Mescladas6" = Table.NestedJoin(#"dPlanoContas Expandido5", {"NUM_CONTA"}, dPlanoContas, {"NUM_CONTA"}, "dPlanoContas", JoinKind.LeftOuter),
+				    #"dPlanoContas Expandido6" = Table.ExpandTableColumn(#"Consultas Mescladas6", "dPlanoContas", {"Sobra Contábil"}, {"Sobra Contábil"}),
+				    #"Linhas Filtradas" = Table.SelectRows(#"dPlanoContas Expandido6", each not Text.StartsWith([COMPLEMENTO], "RNC")),
+				    #"Consulta Acrescentada1" = #"Linhas Filtradas",
+				    #"Tipo Alterado2" = Table.TransformColumnTypes(#"Consulta Acrescentada1",{{"DATDOC", type date}}),
+				    #"Valor Substituído" = Table.ReplaceValue(#"Tipo Alterado2",each [CENTRO_CUSTO_DESC_RECEITA],each if [CENTRO_CUSTO_DESC_RECEITA]="FEIRA DE SANTANA" then "FEIRA DE SANTANA - BA" else [CENTRO_CUSTO_DESC_RECEITA],Replacer.ReplaceValue,{"CENTRO_CUSTO_DESC_RECEITA"}),
+				    //#"Valor Substituído" = Table.ReplaceValue(#"Tipo Alterado2","FEIRA DE SANTANA","FEIRA DE SANTANA - BA",Replacer.ReplaceValue,{"CENTRO_CUSTO_DESC_RECEITA"}),
+				    #"Valor Substituído1" = Table.ReplaceValue(#"Valor Substituído","BELÉM-PA","BELEM - PA",Replacer.ReplaceValue,{"CENTRO_CUSTO_DESC_RECEITA"}),
+				    #"Valor Substituído2" = Table.ReplaceValue(#"Valor Substituído1","CORP - LOGISTICA","CORPORATIVO LOGISTICA",Replacer.ReplaceText,{"CENTRO_CUSTO_DESC_RECEITA"}),
+				    #"Appended Query1" = #"Valor Substituído2",
+				    #"Filtered Rows" = Table.SelectRows(#"Appended Query1", each ([SINAL_LANCAMENTO] <> "N")),
+				    #"Coluna Duplicada" = Table.DuplicateColumn(#"Filtered Rows", "C.N.P.J./C.P.F. participante", "C.N.P.J./C.P.F. participante - Copiar"),
+				    #"Coluna Duplicada1" = Table.DuplicateColumn(#"Coluna Duplicada", "N Doc Ajustado", "N Doc Ajustado - Copiar"),
+				    #"Valor Substituído3" = Table.ReplaceValue(#"Coluna Duplicada1",".","",Replacer.ReplaceText,{"C.N.P.J./C.P.F. participante - Copiar"}),
+				    #"Valor Substituído4" = Table.ReplaceValue(#"Valor Substituído3","-","",Replacer.ReplaceText,{"C.N.P.J./C.P.F. participante - Copiar"}),
+				    #"Valor Substituído5" = Table.ReplaceValue(#"Valor Substituído4","/","",Replacer.ReplaceText,{"C.N.P.J./C.P.F. participante - Copiar"}),
+				    #"Tipo Alterado" = Table.TransformColumnTypes(#"Valor Substituído5",{{"C.N.P.J./C.P.F. participante - Copiar", Int64.Type}}),
+				    #"Tipo Alterado3" = Table.TransformColumnTypes(#"Tipo Alterado",{{"C.N.P.J./C.P.F. participante - Copiar", type text}}),
+				    #"Colunas Mescladas" = Table.CombineColumns(#"Tipo Alterado3",{"C.N.P.J./C.P.F. participante - Copiar", "N Doc Ajustado - Copiar"},Combiner.CombineTextByDelimiter("-", QuoteStyle.None),"chaveDre"),
+				    #"Personalização Adicionada" = Table.AddColumn(#"Colunas Mescladas", "Personalizar", each if [DATDOC] > #date(2025, 6, 1) and 
+				   List.Contains(
+				       {
+				        "3110200009",
+				        "3110200014",
+				        "3120500005",
+				        "3120500006",
+				        "3120500027",
+				        "3120500028"
+				       }, 
+				       [NUN_CONTA]
+				   )
+				then null else [Receita Liq]),
+				    #"Colunas Renomeadas" = Table.RenameColumns(#"Personalização Adicionada",{{"Receita Liq", "Receita Liq_old"}, {"Personalizar", "Receita Liq"}}),
+				    // Colunas que só existiam nas fontes legadas ficam nulas, para o modelo continuar carregando.
+				    Esperadas = {"TIPO", "VERSAO", "ATIVO", "COD_TRANSP", "Primeiros caracteres", "Deduzir da receita bruta", "Receita Liq_old", "Margem Bruta", "Resultado", "Sobra Gerencial", "Margem Operacional", "Margem Repasse", "Sobra Contábil", "ANO_REF", "MES_REF", "CENTRO_CUSTO_COD", "CENTRO_CUSTO_DESC", "CENTRO_GASTO_COD", "CENTRO_GASTO_DESC", "TIPO_DOC", "SERIE_DOC", "COD_GRUPO_PAG", "CONTRATO_VINCULO", "DATDOC", "NUM_CONTA", "SINAL_LANCAMENTO", "VALOR", "CENTRO_CUSTO_COD_RECEITA", "CENTRO_CUSTO_DESC_RECEITA", "DESC_CONTA_5_GRAU", "COMPLEMENTO", "GRUPO_PAG", "TIPDOC_LANCAMENTO", "Origem Descrição", "Número do documento (Item)", "Lote", "Cód. modelo", "Apelido conta", "Cód. Setor", "NUMDOC", "Setor", "Tipo do lançamento", "Unidade negócio", "Cód. unidade negócio", "Número da Linha", "ID Organizacional", "Departamento", "Código contábil", "Organizacional", "Permite editar", "Cód. Departamento", "Cód. Organizacional", "C.N.P.J./C.P.F. participante", "Inserido por", "Inserido em", "Atualizado por", "Atualizado em", "N Doc Ajustado", "chaveDre", "Receita Liq"},
+				    Faltantes = List.Difference(Esperadas, Table.ColumnNames(#"Colunas Renomeadas")),
+				    Completa = List.Accumulate(Faltantes, #"Colunas Renomeadas", (t, c) => Table.AddColumn(t, c, each null)),
+				    // Filtro exigido pela atualização incremental (RangeStart/RangeEnd sobre a coluna de data).
+				    Janela = Table.SelectRows(Completa, each [DATDOC] <> null and [DATDOC] >= ini and [DATDOC] < fim)
+				in
+				    Janela
+				```
+
+	annotation PBI_ResultType = Table
+
+	annotation PBI_NavigationStepName = Navegação
+

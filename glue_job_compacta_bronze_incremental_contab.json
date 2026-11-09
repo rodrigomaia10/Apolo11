@@ -1,0 +1,31 @@
+{
+  "Name": "compacta_bronze_incremental_contab",
+  "Description": "Compacta o log <tabela>_incremental do bronze de contabilidade: ultima versao por chave + versoes dos ultimos RETENTION_DAYS dias. DRY_RUN=true por padrao.",
+  "Role": "arn:aws:iam::152774997921:role/GlueJobBronzeSilverCatalog",
+  "Command": {
+    "Name": "glueetl",
+    "ScriptLocation": "s3://cootravale-glue/scripts/compacta_bronze_incremental_contab.py",
+    "PythonVersion": "3"
+  },
+  "DefaultArguments": {
+    "--enable-metrics": "",
+    "--ENV": "prd",
+    "--spark-event-logs-path": "s3://cootravale-glue/temporary/",
+    "--enable-job-insights": "true",
+    "--FILE_JSON": "bronze_sources_contab.json",
+    "--conf": "spark.sql.catalog.glue_catalog.glue.skip-name-validation=true",
+    "--enable-glue-datacatalog": "",
+    "--BUCKET_GLUE": "cootravale-glue",
+    "--RETENTION_DAYS": "30",
+    "--DRY_RUN": "true",
+    "--job-bookmark-option": "job-bookmark-disable",
+    "--job-language": "python",
+    "--TempDir": "s3://cootravale-glue/temporary/"
+  },
+  "ExecutionProperty": { "MaxConcurrentRuns": 1 },
+  "MaxRetries": 0,
+  "Timeout": 480,
+  "GlueVersion": "5.0",
+  "WorkerType": "G.1X",
+  "NumberOfWorkers": 4
+}

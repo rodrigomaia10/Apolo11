@@ -1,0 +1,73 @@
+{
+ "Name": "vw_fato_dre_contabil",
+ "DatabaseName": "hml_gold",
+ "CreateTime": "2026-10-19T12:44:31-03:00",
+ "UpdateTime": "2026-10-21T13:33:26-03:00",
+ "Retention": 0,
+ "StorageDescriptor": {
+  "Columns": [
+   {
+    "Name": "mes_lancamento",
+    "Type": "string"
+   },
+   {
+    "Name": "data_mes",
+    "Type": "date"
+   },
+   {
+    "Name": "classificacao",
+    "Type": "string"
+   },
+   {
+    "Name": "num_conta",
+    "Type": "bigint"
+   },
+   {
+    "Name": "conta_descricao",
+    "Type": "string"
+   },
+   {
+    "Name": "nivel_1",
+    "Type": "string"
+   },
+   {
+    "Name": "nivel_2",
+    "Type": "string"
+   },
+   {
+    "Name": "origem",
+    "Type": "string"
+   },
+   {
+    "Name": "centro_custo",
+    "Type": "string"
+   },
+   {
+    "Name": "valor",
+    "Type": "double"
+   },
+   {
+    "Name": "itens",
+    "Type": "bigint"
+   }
+  ],
+  "Location": "",
+  "Compressed": false,
+  "NumberOfBuckets": 0,
+  "SerdeInfo": {},
+  "SortColumns": [],
+  "StoredAsSubDirectories": false
+ },
+ "ViewOriginalText": "/* Presto View: eyJvcmlnaW5hbFNxbCI6IldJVEhcbiAgaCBBUyAoXG4gICBTRUxFQ1RcbiAgICAgbnVtX2xhbmNhbWVudG9cbiAgICwgbWF4X2J5KGRhdGFfbGFuY2FtZW50bywgZGF0ZV91cGRhdGUpIGR0XG4gICAsIG1heF9ieShhZ3J1cGFtZW50b19pZCwgZGF0ZV91cGRhdGUpIGFnclxuICAgRlJPTVxuICAgICBobWxfYnJvbnplLmttbV9jb250YWJfY29udGFiX2xhbmNhbWVudG9cbiAgIEdST1VQIEJZIG51bV9sYW5jYW1lbnRvXG4pIFxuLCBnIEFTIChcbiAgIFNFTEVDVFxuICAgICBhZ3J1cGFtZW50b19pZFxuICAgLCBhcmJpdHJhcnkoY29kX29yaWdlbSkgY29kX29yaWdlbVxuICAgRlJPTVxuICAgICBobWxfYnJvbnplLmttbV9jb250YWJfY29udGFiaWxpemFjYW9fYWdydXBhbWVudG9cbiAgIEdST1VQIEJZIGFncnVwYW1lbnRvX2lkXG4pIFxuLCBwIEFTIChcbiAgIFNFTEVDVFxuICAgICBjb2RfcmVkdXppZG9cbiAgICwgYXJiaXRyYXJ5KGNsYXNzaWZpY2FjYW8pIGNsXG4gICAsIGFyYml0cmFyeShkZXNjcmljYW8pIGRzXG4gICBGUk9NXG4gICAgIGhtbF9icm9uemUua21tX2NvbnRhYl9wbGFub19jb250YXNcbiAgIEdST1VQIEJZIGNvZF9yZWR1emlkb1xuKSBcbiwgbyBBUyAoXG4gICBTRUxFQ1RcbiAgICAgY29kX29yaWdlbVxuICAgLCBhcmJpdHJhcnkoZGVzY3JpY2FvKSBkc1xuICAgRlJPTVxuICAgICBobWxfYnJvbnplLmttbV9jb250YWJfY29udGFiaWxpemFjYW9fb3JpZ2VtXG4gICBHUk9VUCBCWSBjb2Rfb3JpZ2VtXG4pIFxuLCBjYyBBUyAoXG4gICBTRUxFQ1RcbiAgICAgQ0FTVChjb2RfY2VudHJvX2N1c3RvIEFTIGJpZ2ludCkgY29kXG4gICAsIGFyYml0cmFyeShjZW50cm9fY3VzdG8pIG5vbWVcbiAgIEZST01cbiAgICAgcHJkX2Jyb256ZS5rbW1fa3NzX2NlbnRyb19jdXN0b1xuICAgR1JPVVAgQlkgQ0FTVChjb2RfY2VudHJvX2N1c3RvIEFTIGJpZ2ludClcbikgXG5TRUxFQ1RcbiAgZGF0ZV9mb3JtYXQoaC5kdCwgJyVZLSVtJykgbWVzX2xhbmNhbWVudG9cbiwgQ0FTVChkYXRlX3RydW5jKCdtb250aCcsIGguZHQpIEFTIGRhdGUpIGRhdGFfbWVzXG4sIHAuY2wgY2xhc3NpZmljYWNhb1xuLCBDQVNUKHJlZ2V4cF9yZXBsYWNlKHAuY2wsICdcXC4nLCAnJykgQVMgYmlnaW50KSBudW1fY29udGFcbiwgcC5kcyBjb250YV9kZXNjcmljYW9cbiwgc3Vic3RyKHAuY2wsIDEsIDMpIG5pdmVsXzFcbiwgc3Vic3RyKHAuY2wsIDEsIDgpIG5pdmVsXzJcbiwgQ09BTEVTQ0UoTlVMTElGKG8uZHMsICcnKSwgJyhzZW0gb3JpZ2VtKScpIG9yaWdlbVxuLCByZWdleHBfcmVwbGFjZShjYy5ub21lLCAnXlswLTldKyAtICcsICcnKSBjZW50cm9fY3VzdG9cbiwgU1VNKChpLnZhbG9yX2NyZWRpdG8gLSBpLnZhbG9yX2RlYml0bykpIHZhbG9yXG4sIENPVU5UKCopIGl0ZW5zXG5GUk9NXG4gICgoKCgoaG1sX2Jyb256ZS5rbW1fY29udGFiX2NvbnRhYl9sYW5jYW1lbnRvX2l0IGlcbklOTkVSIEpPSU4gaCBPTiAoaC5udW1fbGFuY2FtZW50byA9IGkubnVtX2xhbmNhbWVudG8pKVxuSU5ORVIgSk9JTiBwIE9OIChwLmNvZF9yZWR1emlkbyA9IGkuY29kX3JlZHV6aWRvKSlcbkxFRlQgSk9JTiBnIE9OIChnLmFncnVwYW1lbnRvX2lkID0gaC5hZ3IpKVxuTEVGVCBKT0lOIG8gT04gKG8uY29kX29yaWdlbSA9IGcuY29kX29yaWdlbSkpXG5MRUZUIEpPSU4gY2MgT04gKGNjLmNvZCA9IGkuY29kX2NlbnRyb19jdXN0bykpXG5XSEVSRSAocC5jbCA+PSAnMycpXG5HUk9VUCBCWSAxLCAyLCAzLCA0LCA1LCA2LCA3LCA4LCA5XG4iLCJjYXRhbG9nIjoiYXdzZGF0YWNhdGFsb2ciLCJzY2hlbWEiOiJobWxfYnJvbnplIiwiY29sdW1ucyI6W3sibmFtZSI6Im1lc19sYW5jYW1lbnRvIiwidHlwZSI6InZhcmNoYXIifSx7Im5hbWUiOiJkYXRhX21lcyIsInR5cGUiOiJkYXRlIn0seyJuYW1lIjoiY2xhc3NpZmljYWNhbyIsInR5cGUiOiJ2YXJjaGFyIn0seyJuYW1lIjoibnVtX2NvbnRhIiwidHlwZSI6ImJpZ2ludCJ9LHsibmFtZSI6ImNvbnRhX2Rlc2NyaWNhbyIsInR5cGUiOiJ2YXJjaGFyIn0seyJuYW1lIjoibml2ZWxfMSIsInR5cGUiOiJ2YXJjaGFyIn0seyJuYW1lIjoibml2ZWxfMiIsInR5cGUiOiJ2YXJjaGFyIn0seyJuYW1lIjoib3JpZ2VtIiwidHlwZSI6InZhcmNoYXIifSx7Im5hbWUiOiJjZW50cm9fY3VzdG8iLCJ0eXBlIjoidmFyY2hhciJ9LHsibmFtZSI6InZhbG9yIiwidHlwZSI6ImRvdWJsZSJ9LHsibmFtZSI6Iml0ZW5zIiwidHlwZSI6ImJpZ2ludCJ9XSwib3duZXIiOiIxNTI3NzQ5OTc5MjEiLCJydW5Bc0ludm9rZXIiOmZhbHNlLCJwcm9wZXJ0aWVzIjp7fSwiaXNQcm90ZWN0ZWQiOmZhbHNlLCJpc011bHRpRGlhbGVjdCI6ZmFsc2V9 */",
+ "ViewExpandedText": "/* Presto View */",
+ "TableType": "VIRTUAL_VIEW",
+ "Parameters": {
+  "presto_view": "true",
+  "comment": "Presto View"
+ },
+ "CreatedBy": "arn:aws:iam::152774997921:user/rodrigo.maia@cootravale.com.br",
+ "IsRegisteredWithLakeFormation": false,
+ "CatalogId": "152774997921",
+ "VersionId": "5",
+ "IsMultiDialectView": false
+}

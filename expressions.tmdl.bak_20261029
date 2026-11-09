@@ -1,0 +1,71 @@
+expression RangeStart = #datetime(2024, 1, 1, 0, 0, 0) meta [IsParameterQuery=true, Type="DateTime", IsParameterQueryRequired=true]
+	lineageTag: 3cfc3d30-6402-4780-a0ca-a506ae6d67d0
+	queryGroup: Parametros
+
+	annotation PBI_ResultType = DateTime
+
+expression RangeEnd = #datetime(2027, 1, 1, 0, 0, 0) meta [IsParameterQuery=true, Type="DateTime", IsParameterQueryRequired=true]
+	lineageTag: 2a5c9a71-e6b9-4f1c-aaa1-e4821663d69d
+	queryGroup: Parametros
+
+	annotation PBI_ResultType = DateTime
+
+expression DataCorte = #date(2026, 10, 15) meta [IsParameterQuery=true, Type="Date", IsParameterQueryRequired=true]
+	lineageTag: 1a940c5e-3fe9-451c-8d88-4439a88d6b8a
+	queryGroup: Parametros
+
+	annotation PBI_ResultType = Date
+
+expression ExcelDados2024 =
+		let
+		    Source = Excel.Workbook(Web.Contents("https://cootravale.sharepoint.com/sites/Controladoria2/Documentos%20Compartilhados/PowerbiDados/Base%20Cont%C3%A1bil%202024.xlsx"), null, true),
+		   Dados_Sheet = Source{[Item="Dados",Kind="Sheet"]}[Data],
+		    #"Promoted Headers" = Table.PromoteHeaders(Dados_Sheet, [PromoteAllScalars=true]),
+		    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Data do lançamento", type datetime}}),
+		    #"Changed Type1" = Table.TransformColumnTypes(#"Changed Type",{{"Data do lançamento", type date}}),
+		    SemCols = Table.RemoveColumns(#"Changed Type1", {"Column36", "Column37", "Column38", "Column39", "Column40", "Column41"}, MissingField.Ignore)
+		in
+		    SemCols
+	lineageTag: 2a8db2f8-76d2-4122-adb7-ea666e160bcd
+	queryGroup: 'Fact - consulta'
+
+	annotation PBI_ResultType = Table
+
+expression ExcelDados2025 =
+		let
+		    Source = Excel.Workbook(Web.Contents("https://cootravale.sharepoint.com/sites/Controladoria2/Documentos%20Compartilhados/PowerbiDados/Base%20Cont%C3%A1bil%202025.xlsx"), null, true),
+		    #"Dados _Sheet" = Source{[Item="Dados ",Kind="Sheet"]}[Data],
+		    #"Cabeçalhos Promovidos" = Table.PromoteHeaders(#"Dados _Sheet", [PromoteAllScalars=true]),
+		    #"Colunas Renomeadas" = Table.RenameColumns(#"Cabeçalhos Promovidos",{{"Data", "Data do lançamento"}}),
+		    #"Colunas Reordenadas" = Table.ReorderColumns(#"Colunas Renomeadas",{"N° lançamento", "Data do lançamento", "Número do documento (Item)", "Lote", "Cód. modelo", "Classificação", "Descrição conta", "Apelido conta", "Cód. Setor", "Nº Docto (Lançamento)", "Setor", "Tipo do lançamento", "Unidade negócio", "Cód. unidade negócio", "Número da Linha", "ID Organizacional", "Departamento", "Histórico", "Código contábil", "Débito (R$)", "Crédito (R$)", "Organizacional", "Permite editar", "Cód. Departamento", "Cód. Organizacional", "Cód. Origem", "C.N.P.J./C.P.F. participante", "Cód. Centro Custo", "Participante", "Inserido por", "Inserido em", "Atualizado por", "Atualizado em", "Origem Descrição", "Centro custo"}),
+		    Tipada = Table.TransformColumnTypes(#"Colunas Reordenadas", {{"Data do lançamento", type date}}),
+		    SemCols = Table.RemoveColumns(Tipada, {"Column36", "Column37", "Column38", "Column39", "Column40", "Column41"}, MissingField.Ignore)
+		in
+		    SemCols
+	lineageTag: 4cbe3a66-5b4d-4d20-8940-aef801c22742
+	queryGroup: 'Fact - consulta'
+
+	annotation PBI_ResultType = Table
+
+expression Athena2026 =
+		let
+		    ini = Date.From(RangeStart),
+		    fim = Date.From(RangeEnd),
+		    // Fonte Athena prd (substitui o Excel Base Contábil 2026): itens contábeis KMM com lançamentos manuais, contas de resultado, a partir de 01/01/2026.
+		    Fonte = Odbc.Query("dsn=athena_cootravale_producao", "with pv as (select cte, car_codigo_carga_embarcador car, max(grupo_pessoa_tratado) grp from prd_gold.fato_operacional where con_status in ('A') and car_situacao not in (18, 13) and ped_situacao <> 2 and not (tipo_operacao_anulacao like '%CIOT CANCELADO%') and not (tipo_operacao_anulacao like '%TRANSBORDO%' or tipo_operacao_anulacao like '%REUTILIZACAO%' or (tipo_operacao_anulacao like '%REPASSE%' and tipo_documento = 'CT-e')) and (oco_anulacao is null or oco_anulacao = 0) and mod_abreviacao is not null and mod_abreviacao not in ('DV', 'OST') and tipo_documento is not null and tipo_documento not in ('CV', 'OST', 'NDA', 'DV') and ((has_true = 1 and flag_anulacao = true and con_codigo = max_con_anulacao) or (has_true = 0 and (flag_anulacao = false or flag_anulacao is null))) group by 1, 2), pcar as (select car, max(grp) grp from pv group by 1), cc_cte as (select cte chave, array_join(array_sort(array_agg(distinct car)), ',') cargas, array_join(array_sort(array_agg(distinct grp)), '-') grupos, count(distinct car) qtd from pv group by 1), kcn as (select cast(conhecimento_id as bigint) id, concat(cast(serie as varchar), '-', cast(cast(num_conhecimento as bigint) as varchar)) chave from prd_bronze.kmm_fiscal_conhecimento), ct as (select lancto_id, cast(num_formulario as bigint) nf, contab_agrupamento_id a1, contab_agrupamento_id_estorno a2 from prd_bronze.kmm_contrato_contrato_transp where serie_formulario in ('U','REPOMFRETE','EFRETE','RI','RIC','EXTRATTA','UC','REPOMFRETEC','EFRETEC','UCC','REPOMFRETECC','EFRETECC','UCCC','UCCCC','EXTRATTACC')), cti as (select lancto_id, contab_agrupamento_id a1, contab_agrupamento_id_estorno a2 from prd_bronze.kmm_contrato_contrato_transp_item), kk as (select a1 ag, nf from ct where a1 is not null union all select a2, nf from ct where a2 is not null union all select cti.a1, ct.nf from cti join ct on ct.lancto_id = cti.lancto_id where cti.a1 is not null union all select cti.a2, ct.nf from cti join ct on ct.lancto_id = cti.lancto_id where cti.a2 is not null), kc as (select ag agrupamento_id, max(nf) nf from kk group by 1), cc_ctr as (select cast(cast(cft.cft_numero_contrato as bigint) as varchar) chave, array_join(array_sort(array_agg(distinct cu.car_codigo_carga_embarcador)), ',') cargas, array_join(array_sort(array_agg(distinct pcar.grp)), '-') grupos, count(distinct cu.car_codigo_carga_embarcador) qtd from prd_bronze.multi_dbo_t_contrato_frete_terceiro cft join prd_bronze.multi_dbo_t_carga cu on cu.car_codigo = cft.car_codigo join pcar on pcar.car = cu.car_codigo_carga_embarcador where cft.cft_contrato_frete <> 3 group by 1), dc as (select agrupamento_id, max(tipo_documento) tipo, max(documento_id) id from prd_gold.fato_contab_documento group by 1), dm as (select dc.agrupamento_id, dc.tipo, case when dc.tipo = 'CTE' then kcn.chave else cast(dc.id as varchar) end chave from dc left join kcn on dc.tipo = 'CTE' and kcn.id = dc.id union all select agrupamento_id, 'CONTRATO', cast(nf as varchar) from kc where agrupamento_id not in (select agrupamento_id from dc)), cg as (select 'CTE' tipo, chave, cargas, grupos, qtd from cc_cte union all select 'CONTRATO', chave, cargas, grupos, qtd from cc_ctr), g as (select agrupamento_id, arbitrary(cod_origem) cod_origem, max(agrupamento_id_estorno) est from prd_silver.kmm_contab_agrupamento group by 1), rv as (select distinct agrupamento_id_estorno e from prd_silver.kmm_contab_agrupamento where agrupamento_id_estorno is not null),o as (select cod_origem, arbitrary(descricao) descricao from prd_silver.kmm_contab_origem group by 1), p as (select cod_reduzido, arbitrary(classificacao) classificacao, arbitrary(descricao) descricao from prd_silver.kmm_contab_plano_contas group by 1), cc as (select cast(cod_centro_custo as bigint) cod, arbitrary(centro_custo) nome from prd_bronze.kmm_kss_centro_custo group by 1), pe as (select cod_pessoa, arbitrary(cnpj_cpf) cnpj, arbitrary(razao_social) nome from prd_bronze.kmm_kss_pessoa group by 1), dp as (select cod_departamento, arbitrary(descricao) descricao from prd_bronze.kmm_kss_departamento group by 1), st as (select cod_setor, arbitrary(descricao) descricao from prd_bronze.kmm_kss_setor group by 1) select cast(i.num_lancamento as varchar) c01, cast(cast(h.data_lancamento as date) as varchar) c02, cast(i.num_documento as varchar) c03, i.lote c04, cast(i.cod_modelo as varchar) c05, replace(p.classificacao, '.', '') c06, p.descricao c07, cast(null as varchar) c08, cast(i.cod_setor as varchar) c09, cast(h.num_documento_header as varchar) c10, st.descricao c11, case when g.est is not null then 'Estornado' when rv.e is not null then 'Estorno' else 'Normal' end c12, cast(null as varchar) c13, cast(null as varchar) c14, cast(i.num_lancamento_it as varchar) c15, cast(i.organizacional_id as varchar) c16, dp.descricao c17, i.historico c18, cast(i.cod_reduzido as varchar) c19, i.valor_debito c20, i.valor_credito c21, cast(null as varchar) c22, cast(h.permite_editar as varchar) c23, cast(i.cod_departamento as varchar) c24, cast(i.organizacional_id as varchar) c25, g.cod_origem c26, pe.cnpj c27, cast(i.cod_centro_custo as varchar) c28, pe.nome c29, i.user_insert c30, cast(i.date_insert as varchar) c31, i.user_update c32, cast(i.date_update as varchar) c33, o.descricao c34, cc.nome c35, dm.tipo c36, case when cg.qtd > 0 then cg.cargas end c37, cast(coalesce(cg.qtd, 0) as varchar) c38, case when dm.tipo is null then 'SEM DOCUMENTO' when dm.tipo = 'NF_ES' then 'NF SEM LIGACAO DE CARGA' when cg.qtd > 0 then 'OPERACIONAL' else 'SEM CARGA OPERACIONAL' end c39, case when cg.qtd > 0 then cg.grupos end c40 from prd_bronze.kmm_contab_contab_lancamento_it i left join (select num_lancamento, max_by(data_lancamento, date_update) data_lancamento, max_by(agrupamento_id, date_update) agrupamento_id, max_by(permite_editar, date_update) permite_editar, max_by(num_documento, date_update) num_documento_header from prd_bronze.kmm_contab_contab_lancamento group by 1) h on h.num_lancamento = i.num_lancamento join p on p.cod_reduzido = i.cod_reduzido left join g on g.agrupamento_id = h.agrupamento_id left join rv on rv.e = h.agrupamento_id left join o on o.cod_origem = g.cod_origem left join cc on cc.cod = i.cod_centro_custo left join pe on pe.cod_pessoa = coalesce(i.cod_participante, i.cod_pessoa) left join dp on dp.cod_departamento = i.cod_departamento left join st on st.cod_setor = i.cod_setor left join dm on dm.agrupamento_id = h.agrupamento_id left join cg on cg.tipo = dm.tipo and cg.chave = dm.chave where p.classificacao >= '3' and h.data_lancamento >= date '" & Date.ToText(List.Max({ini, #date(2026, 1, 1)}), "yyyy-MM-dd") & "' and h.data_lancamento < date '" & Date.ToText(fim, "yyyy-MM-dd") & "'"),
+		    Renomeadas = Table.RenameColumns(Fonte, {{"c01", "N° lançamento"}, {"c02", "Data do lançamento"}, {"c03", "Número do documento (Item)"}, {"c04", "Lote"}, {"c05", "Cód. modelo"}, {"c06", "Classificação"}, {"c07", "Descrição conta"}, {"c08", "Apelido conta"}, {"c09", "Cód. Setor"}, {"c10", "Nº Docto (Lançamento)"}, {"c11", "Setor"}, {"c12", "Tipo do lançamento"}, {"c13", "Unidade negócio"}, {"c14", "Cód. unidade negócio"}, {"c15", "Número da Linha"}, {"c16", "ID Organizacional"}, {"c17", "Departamento"}, {"c18", "Histórico"}, {"c19", "Código contábil"}, {"c20", "Débito (R$)"}, {"c21", "Crédito (R$)"}, {"c22", "Organizacional"}, {"c23", "Permite editar"}, {"c24", "Cód. Departamento"}, {"c25", "Cód. Organizacional"}, {"c26", "Cód. Origem"}, {"c27", "C.N.P.J./C.P.F. participante"}, {"c28", "Cód. Centro Custo"}, {"c29", "Participante"}, {"c30", "Inserido por"}, {"c31", "Inserido em"}, {"c32", "Atualizado por"}, {"c33", "Atualizado em"}, {"c34", "Origem Descrição"}, {"c35", "Centro custo"}, {"c36", "Tipo documento carga"}, {"c37", "Cargas operacionais"}, {"c38", "Qtd cargas operacionais"}, {"c39", "Status carga"}, {"c40", "Grupo pessoas tratado"}}),
+		    Tipos = Table.TransformColumnTypes(Renomeadas, {{"Data do lançamento", type date}, {"Débito (R$)", type number}, {"Crédito (R$)", type number}, {"Qtd cargas operacionais", Int64.Type}}),
+		    Ordem = Table.ReorderColumns(Tipos, {"N° lançamento", "Data do lançamento", "Número do documento (Item)", "Lote", "Cód. modelo", "Classificação", "Descrição conta", "Apelido conta", "Cód. Setor", "Nº Docto (Lançamento)", "Setor", "Tipo do lançamento", "Unidade negócio", "Cód. unidade negócio", "Número da Linha", "ID Organizacional", "Departamento", "Histórico", "Código contábil", "Débito (R$)", "Crédito (R$)", "Organizacional", "Permite editar", "Cód. Departamento", "Cód. Organizacional", "Cód. Origem", "C.N.P.J./C.P.F. participante", "Cód. Centro Custo", "Participante", "Inserido por", "Inserido em", "Atualizado por", "Atualizado em", "Origem Descrição", "Centro custo", "Tipo documento carga", "Cargas operacionais", "Qtd cargas operacionais", "Status carga", "Grupo pessoas tratado"})
+		in
+		    Ordem
+	lineageTag: 1745100f-d2c9-4966-a714-ce75fc52c962
+	queryGroup: 'Fact - consulta'
+
+	annotation PBI_ResultType = Table
+
+expression DataValidacao = #date(2026, 10, 25) meta [IsParameterQuery=true, Type="Date", IsParameterQueryRequired=true]
+	lineageTag: d7f0355f-09f2-4ab7-8d0b-a4883a9e33ef
+	queryGroup: Parametros
+
+	annotation PBI_ResultType = Date
+
